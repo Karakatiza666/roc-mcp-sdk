@@ -1,0 +1,20 @@
+# Expected output of tests/e2e/resources.in.jsonl. Made by tests/e2e/js/gen.sh from the JS twin;
+# compared as a multiset of canonical JSON lines (scripts/e2e.sh). Do not edit by hand.
+{"result":{"protocolVersion":"2025-11-25","capabilities":{"logging":{},"tools":{"listChanged":true},"resources":{"listChanged":true,"subscribe":true},"completions":{},"prompts":{"listChanged":true}},"serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"},"instructions":"Exercises every feature of the SDK."},"jsonrpc":"2.0","id":1}
+{"result":{"resources":[{"uri":"info://server","name":"info","title":"Server info","mimeType":"text/plain"},{"uri":"info://stats","name":"stats","mimeType":"application/json"},{"description":"A note","mimeType":"text/plain","uri":"note://alpha","name":"alpha"},{"description":"A note","mimeType":"text/plain","uri":"note://beta","name":"beta"},{"description":"A note","mimeType":"text/plain","uri":"note://gamma","name":"gamma"}]},"jsonrpc":"2.0","id":2}
+{"result":{"resourceTemplates":[{"name":"note","uriTemplate":"note://{name}","description":"A note","mimeType":"text/plain"},{"name":"file","uriTemplate":"file:///{+path}"}]},"jsonrpc":"2.0","id":3}
+{"result":{"contents":[{"uri":"info://server","mimeType":"text/plain","text":"everything server"}]},"jsonrpc":"2.0","id":4}
+{"result":{"contents":[{"uri":"note://beta","mimeType":"text/plain","text":"note beta"}]},"jsonrpc":"2.0","id":5}
+{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"Resource not found: note://zeta","data":{"uri":"note://zeta"}}}
+{"result":{"contents":[{"uri":"file:///docs/readme.txt","mimeType":"text/plain","text":"path=docs/readme.txt"}]},"jsonrpc":"2.0","id":7}
+{"jsonrpc":"2.0","id":8,"error":{"code":-32602,"message":"Resource not found: other://nothing","data":{"uri":"other://nothing"}}}
+{"result":{"completion":{"values":["alpha","beta","gamma"],"total":3,"hasMore":false}},"jsonrpc":"2.0","id":9}
+{"result":{"completion":{"values":["beta"],"total":1,"hasMore":false}},"jsonrpc":"2.0","id":10}
+{"result":{"completion":{"values":[],"hasMore":false}},"jsonrpc":"2.0","id":11}
+{"result":{},"jsonrpc":"2.0","id":12}
+{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"info://server"}}
+{"result":{"content":[{"type":"text","text":"touched 1"}]},"jsonrpc":"2.0","id":13}
+{"result":{},"jsonrpc":"2.0","id":14}
+{"result":{"content":[{"type":"text","text":"touched 0"}]},"jsonrpc":"2.0","id":15}
+{"result":{"content":[{"type":"text","text":"count: 1"}]},"jsonrpc":"2.0","id":16}
+{"result":{"contents":[{"uri":"info://stats","mimeType":"application/json","text":"{\"count\":1,\"toolCalls\":3,\"pokes\":0}"}]},"jsonrpc":"2.0","id":17}

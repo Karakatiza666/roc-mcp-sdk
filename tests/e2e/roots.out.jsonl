@@ -1,0 +1,10 @@
+# Expected output of tests/e2e/roots.in.jsonl. Made by tests/e2e/js/gen.sh from the JS twin;
+# compared as a multiset of canonical JSON lines (scripts/e2e.sh). Do not edit by hand.
+{"result":{"protocolVersion":"2025-11-25","capabilities":{"logging":{},"tools":{"listChanged":true},"resources":{"listChanged":true,"subscribe":true},"completions":{},"prompts":{"listChanged":true}},"serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"},"instructions":"Exercises every feature of the SDK."},"jsonrpc":"2.0","id":1}
+{"method":"roots/list","params":{"_meta":{"progressToken":0}},"jsonrpc":"2.0","id":"mcp-sdk-0"}
+{"result":{},"jsonrpc":"2.0","id":3}
+{"result":{"content":[{"type":"text","text":"roots: file:///a, file:///b"}]},"jsonrpc":"2.0","id":2}
+{"result":{"content":[{"type":"text","text":"cached roots: file:///a, file:///b"}]},"jsonrpc":"2.0","id":4}
+{"method":"roots/list","params":{"_meta":{"progressToken":1}},"jsonrpc":"2.0","id":"mcp-sdk-1"}
+{"result":{"content":[{"type":"text","text":"roots: file:///c"}]},"jsonrpc":"2.0","id":5}
+{"result":{"count":0,"toolCalls":5,"pokes":0},"jsonrpc":"2.0","id":6}

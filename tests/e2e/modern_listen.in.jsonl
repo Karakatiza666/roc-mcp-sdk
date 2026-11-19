@@ -1,0 +1,12 @@
+# 2026-07-28 subscriptions/listen on stdio: acknowledgements with the honoured subset, change
+# notifications stamped with the subscription id, notifications/cancelled ending one, errors,
+# and the final result of the open subscription at the end of input (graceful close).
+{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true,"resourcesListChanged":false,"resourceSubscriptions":["info://server"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}
+{"jsonrpc":"2.0","id":"s2","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true,"promptsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"unlock","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}
+{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"unlock","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"touch","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}
+{"jsonrpc":"2.0","id":6,"method":"subscriptions/listen","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}
+{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{}}}
+{"jsonrpc":"2.0","id":8,"method":"subscriptions/listen","params":{"notifications":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2099-01-01","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}

@@ -1,0 +1,14 @@
+# Expected output of tests/e2e/modern_listen.in.jsonl. Made by tests/e2e/js/gen.sh from the JS twin;
+# compared as a multiset of canonical JSON lines (scripts/e2e.sh). Do not edit by hand.
+{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":{"toolsListChanged":true,"resourceSubscriptions":["info://server"]},"_meta":{"io.modelcontextprotocol/subscriptionId":1}}}
+{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":{"toolsListChanged":true,"promptsListChanged":true},"_meta":{"io.modelcontextprotocol/subscriptionId":"s2"}}}
+{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":1}}}
+{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":"s2"}}}
+{"result":{"content":[{"type":"text","text":"unlocked"}],"resultType":"complete","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"}}},"jsonrpc":"2.0","id":3}
+{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":"s2"}}}
+{"result":{"content":[{"type":"text","text":"unlocked"}],"resultType":"complete","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"}}},"jsonrpc":"2.0","id":4}
+{"result":{"content":[{"type":"text","text":"touched 0"}],"resultType":"complete","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"}}},"jsonrpc":"2.0","id":5}
+{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"Invalid params: 'notifications' is required and must be a valid SubscriptionFilter"}}
+{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"Invalid _meta envelope: _meta: the per-request envelope is required on protocol revision 2026-07-28"}}
+{"jsonrpc":"2.0","id":8,"error":{"code":-32022,"message":"Unsupported protocol version: 2099-01-01","data":{"supported":["2026-07-28"],"requested":"2099-01-01"}}}
+{"jsonrpc":"2.0","id":"s2","result":{"resultType":"complete","_meta":{"io.modelcontextprotocol/subscriptionId":"s2","io.modelcontextprotocol/serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"}}}}

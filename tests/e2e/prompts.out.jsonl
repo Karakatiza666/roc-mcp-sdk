@@ -1,0 +1,11 @@
+# Expected output of tests/e2e/prompts.in.jsonl. Made by tests/e2e/js/gen.sh from the JS twin;
+# compared as a multiset of canonical JSON lines (scripts/e2e.sh). Do not edit by hand.
+{"result":{"protocolVersion":"2025-11-25","capabilities":{"logging":{},"tools":{"listChanged":true},"resources":{"listChanged":true,"subscribe":true},"completions":{},"prompts":{"listChanged":true}},"serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"},"instructions":"Exercises every feature of the SDK."},"jsonrpc":"2.0","id":1}
+{"result":{"prompts":[{"name":"greet","title":"Greeting","description":"Greet someone","arguments":[{"name":"name","description":"Who to greet","required":true},{"name":"style","required":false}]}]},"jsonrpc":"2.0","id":2}
+{"result":{"description":"A greeting","messages":[{"role":"user","content":{"type":"text","text":"Hi Ann!"}}]},"jsonrpc":"2.0","id":3}
+{"result":{"description":"A greeting","messages":[{"role":"user","content":{"type":"text","text":"Good day, Ann."}}]},"jsonrpc":"2.0","id":4}
+{"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"Prompt nope not found"}}
+{"result":{"completion":{"values":["casual","formal"],"total":2,"hasMore":false}},"jsonrpc":"2.0","id":6}
+{"result":{"completion":{"values":["formal"],"total":1,"hasMore":false}},"jsonrpc":"2.0","id":7}
+{"result":{"completion":{"values":["formal"],"total":1,"hasMore":false}},"jsonrpc":"2.0","id":8}
+{"result":{"completion":{"values":[],"hasMore":false}},"jsonrpc":"2.0","id":9}

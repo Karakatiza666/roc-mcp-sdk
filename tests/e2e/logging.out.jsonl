@@ -1,0 +1,19 @@
+# Expected output of tests/e2e/logging.in.jsonl. Made by tests/e2e/js/gen.sh from the JS twin;
+# compared as a multiset of canonical JSON lines (scripts/e2e.sh). Do not edit by hand.
+{"result":{"protocolVersion":"2025-11-25","capabilities":{"logging":{},"tools":{"listChanged":true},"resources":{"listChanged":true,"subscribe":true},"completions":{},"prompts":{"listChanged":true}},"serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"},"instructions":"Exercises every feature of the SDK."},"jsonrpc":"2.0","id":1}
+{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"debug","data":"debug line"}}
+{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"info line"}}
+{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"warning","data":"warning line"}}
+{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"error","data":{"detail":"error line"}}}
+{"result":{"content":[{"type":"text","text":"logged"}]},"jsonrpc":"2.0","id":2}
+{"result":{},"jsonrpc":"2.0","id":3}
+{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"warning","data":"warning line"}}
+{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"error","data":{"detail":"error line"}}}
+{"result":{"content":[{"type":"text","text":"logged"}]},"jsonrpc":"2.0","id":4}
+{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"tok-1","progress":1,"total":3,"message":"step 1"}}
+{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"tok-1","progress":2,"total":3,"message":"step 2"}}
+{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"tok-1","progress":3,"total":3,"message":"step 3"}}
+{"result":{"content":[{"type":"text","text":"done 3 steps"}]},"jsonrpc":"2.0","id":5}
+{"result":{"content":[{"type":"text","text":"done 2 steps"}]},"jsonrpc":"2.0","id":6}
+{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":42,"progress":1,"total":1,"message":"step 1"}}
+{"result":{"content":[{"type":"text","text":"done 1 steps"}]},"jsonrpc":"2.0","id":7}

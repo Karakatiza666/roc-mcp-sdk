@@ -1,0 +1,6 @@
+# The first message: an invalid envelope (-32602 with data.envelope) and an unsupported
+# version (-32022) leave the era open; a request with a valid envelope then selects 2026-07-28.
+{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"counter","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"e2e","version":"1.0.0"}}}}
+{"jsonrpc":"2.0","id":4,"method":"initialize","params":{"capabilities":{}}}

@@ -1,0 +1,19 @@
+# Static resources, templates (list, read, complete), errors, subscriptions.
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"e2e","version":"1.0.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"resources/list"}
+{"jsonrpc":"2.0","id":3,"method":"resources/templates/list"}
+{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"info://server"}}
+{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"note://beta"}}
+{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"note://zeta"}}
+{"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}
+{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"other://nothing"}}
+{"jsonrpc":"2.0","id":9,"method":"completion/complete","params":{"ref":{"type":"ref/resource","uri":"note://{name}"},"argument":{"name":"name","value":""}}}
+{"jsonrpc":"2.0","id":10,"method":"completion/complete","params":{"ref":{"type":"ref/resource","uri":"note://{name}"},"argument":{"name":"name","value":"b"}}}
+{"jsonrpc":"2.0","id":11,"method":"completion/complete","params":{"ref":{"type":"ref/resource","uri":"file:///{+path}"},"argument":{"name":"path","value":"x"}}}
+{"jsonrpc":"2.0","id":12,"method":"resources/subscribe","params":{"uri":"info://server"}}
+{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"touch","arguments":{}}}
+{"jsonrpc":"2.0","id":14,"method":"resources/unsubscribe","params":{"uri":"info://server"}}
+{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"touch","arguments":{}}}
+{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"counter","arguments":{}}}
+{"jsonrpc":"2.0","id":17,"method":"resources/read","params":{"uri":"info://stats"}}

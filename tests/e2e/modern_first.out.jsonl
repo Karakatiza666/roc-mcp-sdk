@@ -1,0 +1,6 @@
+# Expected output of tests/e2e/modern_first.in.jsonl. Made by tests/e2e/js/gen.sh from the JS twin;
+# compared as a multiset of canonical JSON lines (scripts/e2e.sh). Do not edit by hand.
+{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid _meta envelope for protocol revision 2026-07-28: io.modelcontextprotocol/clientCapabilities: missing","data":{"envelope":{"key":"io.modelcontextprotocol/clientCapabilities","problem":"missing"}}}}
+{"jsonrpc":"2.0","id":2,"error":{"code":-32022,"message":"Unsupported protocol version: 2025-11-25","data":{"supported":["2026-07-28"],"requested":"2025-11-25"}}}
+{"result":{"content":[{"type":"text","text":"count: 1"}],"resultType":"complete","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"everything","version":"1.0.0","title":"Everything"}}},"jsonrpc":"2.0","id":3}
+{"jsonrpc":"2.0","id":4,"error":{"code":-32022,"message":"Unsupported protocol version: the request did not name a protocol version","data":{"supported":["2026-07-28"]}}}

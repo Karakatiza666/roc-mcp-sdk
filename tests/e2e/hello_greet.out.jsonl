@@ -1,0 +1,4 @@
+# Hand-written in the JS SDK's shapes (hello.roc has no JS twin).
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"hello","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"greet","description":"Say hello","inputSchema":{"type":"object","$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"name":{"type":"string","description":"Who to greet"}},"required":["name"]}}]}}
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"Hello, World!"}]}}
