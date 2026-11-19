@@ -13,6 +13,7 @@ package
 		ResourceContents,
 		ResourceTemplate,
 		Schema,
+		SchemaCheck,
 		Server,
 		Stdio,
 		StreamableHttp,

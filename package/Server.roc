@@ -37,6 +37,7 @@ Server(state) :: {
 	verify_request_state : Try((Ctx, Str -> Bool), [None]),
 	versions : { legacy : List(Str), modern : List(Str) },
 	input_failures : [ToHandler, FailRequest],
+	input_validation : Bool,
 }.{
 
 	## `completion/complete` callback: the partial value and the other arguments, to candidates.
@@ -48,10 +49,12 @@ Server(state) :: {
 	Middleware(state) : state, Ctx, Str, (state => (state, Outcome(ToolResult))) => (state, Outcome(ToolResult))
 
 	## A registered tool. `prepare` decodes the arguments; `Err` is the validation message.
+	## `validate`: check the arguments against the input schema first (`tool_input_validation`).
 	ToolEntry(state) : {
 		tool : Tool,
 		enabled : state -> Bool,
 		prepare : JsonValue -> Try((state, Ctx => (state, Outcome(ToolResult))), Str),
+		validate : Bool,
 	}
 
 	ResourceEntry(state) : {
@@ -97,6 +100,7 @@ Server(state) :: {
 		verify_request_state : Try((Ctx, Str -> Bool), [None]),
 		versions : { legacy : List(Str), modern : List(Str) },
 		input_failures : [ToHandler, FailRequest],
+		input_validation : Bool,
 	}
 
 	new : { name : Str, version : Str } -> Server(state)
@@ -119,6 +123,7 @@ Server(state) :: {
 		verify_request_state: Err(None),
 		versions: { legacy: ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"], modern: ["2026-07-28"] },
 		input_failures: ToHandler,
+		input_validation: Bool.True,
 	}
 
 	## serverInfo.title / description / websiteUrl. serverInfo keeps the order of these calls.
@@ -179,7 +184,13 @@ Server(state) :: {
 	with_input_failures = |s, mode| { ..s, input_failures: mode }
 
 	## A tool whose arguments decode into the app's record type `args` (Encoding.Json).
-	## A decode failure is an `isError` result "Input validation error: ...", as in JS.
+	##
+	## The arguments are first checked against the tool's input schema (`SchemaCheck`), as JS
+	## checks them with the tool's zod schema: a failure is the `isError` result
+	## "Input validation error: Invalid arguments for tool <name>: <zod's messages>", and the
+	## handler gets the checked value (unknown keys dropped, defaults filled in). A decode
+	## failure after that (a schema looser than the record) is the same result with the
+	## decoder's message.
 	tool : Server(state), Tool, (state, Ctx, args => (state, Outcome(ToolResult))) -> Server(state)
 		where [args.Json.Parseable(_)]
 	tool = |s, def, handler!| {
@@ -187,15 +198,33 @@ Server(state) :: {
 			Ok(args) => Ok(|st, ctx| handler!(st, ctx, args))
 			Err(e) => Err("Invalid arguments for tool ${def.name()}: ${decode_error(Str.inspect(e))}")
 		}
-		add_tool(s, { tool: def, enabled: |_| Bool.True, prepare })
+		add_tool(s, { tool: def, enabled: |_| Bool.True, prepare, validate: Bool.True })
 	}
 
-	## A tool that takes its arguments as JSON (an object; `{}` when the client sent none).
+	## A tool that takes its arguments as JSON (an object; `{}` when the client sent none),
+	## checked against its input schema first, as for `tool`.
 	tool_json : Server(state), Tool, (state, Ctx, JsonValue => (state, Outcome(ToolResult))) -> Server(state)
 	tool_json = |s, def, handler!| {
 		prepare = |raw| Ok(|st, ctx| handler!(st, ctx, raw))
-		add_tool(s, { tool: def, enabled: |_| Bool.True, prepare })
+		add_tool(s, { tool: def, enabled: |_| Bool.True, prepare, validate: Bool.True })
 	}
+
+	## Whether tools/call arguments and prompts/get arguments are checked against the input
+	## schema (a tool's `with_input_schema`, a prompt's `with_argument` list) before the handler
+	## runs. On by default (JS parity). See `SchemaCheck` for what is checked.
+	with_input_validation : Server(state), Bool -> Server(state)
+	with_input_validation = |s, on| { ..s, input_validation: on }
+
+	## Turns the schema check off (or on again) for one tool, e.g. one whose JS original
+	## preprocesses its arguments (`z.preprocess`), which no JSON Schema shows. Its handler then
+	## gets the arguments as sent. Crashes when no tool has that name.
+	tool_input_validation : Server(state), Str, Bool -> Server(state)
+	tool_input_validation = |s, n, on|
+		if s.tools.any(|t| t.tool.name() == n) {
+			{ ..s, tools: s.tools.map(|t| if (t.tool.name() == n) { ..t, validate: on } else t) }
+		} else {
+			crash "Server.tool_input_validation: no tool named ${n}"
+		}
 
 	## Shows the named tool only while `pred(state)` holds (JS enable()/disable()). A call to a
 	## hidden tool gets -32602 "Tool X disabled". A handler that changes the answer calls
@@ -210,8 +239,33 @@ Server(state) :: {
 
 	## Middleware around every tools/call: gets the tool name and the call to run.
 	## The first one registered is the outermost.
+	##
+	## It runs once per handler run, so a call that asks for input (`NeedInput`) passes through
+	## it once per round: the outcome is `NeedInput` in every round but the last, and `Done` (or
+	## `Fail`) in the last. A call refused before its handler (unknown tool, invalid arguments)
+	## does not reach it. To change only the final result, use `map_tool_results`.
 	around_tools : Server(state), (state, Ctx, Str, (state => (state, Outcome(ToolResult))) => (state, Outcome(ToolResult))) -> Server(state)
 	around_tools = |s, mw!| { ..s, around_tools: s.around_tools.append(mw!) }
+
+	## Changes the final result of every tools/call: runs only on a `Done` outcome (the last
+	## round of a call that asked for input), with the tool name. A JS wrapper around each tool
+	## callback, such as roc-syntax-mcp's note appended to the last text block, maps to this.
+	## It is an `around_tools` middleware, in registration order with the others.
+	map_tool_results : Server(state), (state, Ctx, Str, ToolResult => (state, ToolResult)) -> Server(state)
+	map_tool_results = |s, f!|
+		Server.around_tools(
+			s,
+			|st, ctx, n, next!| {
+				(st1, out) = next!(st)
+				match out {
+					Done(result) => {
+						(st2, mapped) = f!(st1, ctx, n, result)
+						(st2, Outcome.done(mapped))
+					}
+					other => (st1, other)
+				}
+			},
+		)
 
 	## A static resource. Its URI must be unique.
 	resource : Server(state), Resource, (state, Ctx, Str => (state, Outcome(List(ResourceContents)))) -> Server(state)
@@ -351,6 +405,7 @@ Server(state) :: {
 		verify_request_state: s.verify_request_state,
 		versions: s.versions,
 		input_failures: s.input_failures,
+		input_validation: s.input_validation,
 	}
 }
 

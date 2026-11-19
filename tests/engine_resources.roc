@@ -122,10 +122,23 @@ expect run([req("1", "resources/subscribe", "{\"uri\":\"file:///a\"}")]) == ["{\
 # Prompts.
 expect run([req("11", "prompts/list", "{}")]) == ["{\"result\":{\"prompts\":[{\"name\":\"greet\",\"description\":\"g\",\"arguments\":[{\"name\":\"who\",\"description\":\"Who\",\"required\":true},{\"name\":\"mood\",\"required\":false}]},{\"name\":\"plain\"}]},\"jsonrpc\":\"2.0\",\"id\":11}"]
 expect run([req("12", "prompts/get", "{\"name\":\"greet\",\"arguments\":{\"who\":\"bob\"}}")]) == ["{\"result\":{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"hi bob undefined\"}}]},\"jsonrpc\":\"2.0\",\"id\":12}"]
-expect Session.first_has(run([req("13", "prompts/get", "{\"name\":\"greet\"}")]), "{\"jsonrpc\":\"2.0\",\"id\":13,\"error\":{\"code\":-32602,\"message\":\"Invalid arguments for prompt greet: ")
+# Arguments are checked against the declared ones (JS: the argsSchema of strings).
+expect run([req("13", "prompts/get", "{\"name\":\"greet\"}")]) == ["{\"jsonrpc\":\"2.0\",\"id\":13,\"error\":{\"code\":-32602,\"message\":\"Invalid arguments for prompt greet: Invalid input: expected object, received undefined\"}}"]
+expect run([req("16", "prompts/get", "{\"name\":\"greet\",\"arguments\":{\"mood\":\"x\"}}")]) == ["{\"jsonrpc\":\"2.0\",\"id\":16,\"error\":{\"code\":-32602,\"message\":\"Invalid arguments for prompt greet: who: Invalid input: expected string, received undefined\"}}"]
+# A prompt without declared arguments takes anything (JS: no argsSchema).
+expect run([req("17", "prompts/get", "{\"name\":\"plain\",\"arguments\":{\"x\":\"y\"}}")]) == ["{\"result\":{\"description\":\"pd\",\"messages\":[{\"role\":\"assistant\",\"content\":{\"type\":\"text\",\"text\":\"p\"}}]},\"jsonrpc\":\"2.0\",\"id\":17}"]
 expect run([req("14", "prompts/get", "{\"name\":\"nope\"}")]) == ["{\"jsonrpc\":\"2.0\",\"id\":14,\"error\":{\"code\":-32602,\"message\":\"Prompt nope not found\"}}"]
 expect run([req("15", "prompts/get", "{\"name\":\"plain\"}")]) == ["{\"result\":{\"description\":\"pd\",\"messages\":[{\"role\":\"assistant\",\"content\":{\"type\":\"text\",\"text\":\"p\"}}]},\"jsonrpc\":\"2.0\",\"id\":15}"]
-expect Session.first_has(run([req("26", "prompts/get", "{\"name\":\"greet\",\"arguments\":{\"who\":5}}")]), "{\"jsonrpc\":\"2.0\",\"id\":26,\"error\":{\"code\":-32602,")
+# Malformed params: JS answers -32603 with zod's issue list of its request schema.
+internal : Str, Str -> List(Str)
+internal = |id, issues| {
+	line : JsonValue
+	line = Object([("jsonrpc", String("2.0")), ("id", Number(id)), ("error", Object([("code", Number("-32603")), ("message", String(issues))]))])
+	[line.to_str()]
+}
+expect run([req("26", "prompts/get", "{\"name\":\"greet\",\"arguments\":{\"who\":5,\"mood\":true}}")]) == internal("26", "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"arguments\",\n      \"who\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"arguments\",\n      \"mood\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]")
+expect run([req("27", "prompts/get", "{\"name\":5}")]) == internal("27", "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"name\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]")
+expect run([req("28", "prompts/get", "{\"name\":\"nope\",\"arguments\":null}")]) == internal("28", "[\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received null\"\n  }\n]")
 
 # completion/complete.
 complete : Str, Str -> Str

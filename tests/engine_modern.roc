@@ -27,6 +27,11 @@ expect Session.same(run(Modern.server, basics_in), basics_out)
 # Byte for byte (JS's key order: the result's own keys, resultType, ttlMs, cacheScope, _meta).
 expect run(Modern.server, [basics_in.first() ?? "", basics_in.get(11) ?? ""]) == [basics_out.first() ?? "", basics_out.get(11) ?? ""]
 
+# Arguments are checked against the input schema in this era too (the same tools/call handler in JS).
+expect
+	run(Modern.server, ["{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":1},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{},\"io.modelcontextprotocol/clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}}"])
+		== ["{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Input validation error: Invalid arguments for tool echo: text: Invalid input: expected string, received number\"}],\"isError\":true,\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":\"m\",\"version\":\"1\"}}},\"jsonrpc\":\"2.0\",\"id\":3}"]
+
 # The era: modern after a request with a valid envelope.
 expect after(Modern.server, basics_in.take_first(1)).current_era() == Modern
 expect after(Modern.server, basics_in.take_first(2)).negotiated_version() == "2026-07-28"

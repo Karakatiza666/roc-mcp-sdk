@@ -96,11 +96,30 @@ expect {
 	}
 }
 
-# Undecodable arguments: an isError result, no call (JS: same, with zod's message).
-expect Session.first_has(run([call("4", "{\"name\":\"echo\",\"arguments\":{}}")]), "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Input validation error: Invalid arguments for tool echo: ")
-expect Session.first_has(run([call("5", "{\"name\":\"echo\"}")]), "\"isError\":true},\"jsonrpc\":\"2.0\",\"id\":5}")
-expect Session.first_has(run([call("24", "{\"name\":\"echo\",\"arguments\":{\"text\":5}}")]), "Input validation error: Invalid arguments for tool echo: ")
+# Arguments checked against the input schema: an isError result with zod's text, no call (JS).
+expect run([call("4", "{\"name\":\"echo\",\"arguments\":{}}")]) == ["{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Input validation error: Invalid arguments for tool echo: text: Invalid input: expected string, received undefined\"}],\"isError\":true},\"jsonrpc\":\"2.0\",\"id\":4}"]
+expect run([call("5", "{\"name\":\"echo\"}")]) == ["{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Input validation error: Invalid arguments for tool echo: text: Invalid input: expected string, received undefined\"}],\"isError\":true},\"jsonrpc\":\"2.0\",\"id\":5}"]
+expect run([call("24", "{\"name\":\"echo\",\"arguments\":{\"text\":5}}")]) == ["{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Input validation error: Invalid arguments for tool echo: text: Invalid input: expected string, received number\"}],\"isError\":true},\"jsonrpc\":\"2.0\",\"id\":24}"]
 expect (Engine.receive(server, Engine.Session.new, Bool.False, call("4", "{\"name\":\"echo\",\"arguments\":{}}"))).calls.is_empty()
+
+# map_tool_results is a middleware like around_tools (its behaviour, on the final result only,
+# needs a handler run: E2E `roots`, the " [final]" suffix).
+expect {
+	mapped : Server(Bool)
+	mapped = server.map_tool_results(|st, _c, _n, r| (st, r))
+	mapped.parts().around_tools.len() == 1 and server.parts().around_tools.is_empty()
+}
+
+# Without the schema check (for the server, or one tool), the decoder's message is the fallback.
+expect {
+	unchecked : Server(Bool)
+	unchecked = server.with_input_validation(Bool.False)
+	one_off : Server(Bool)
+	one_off = server.tool_input_validation("echo", Bool.False)
+	expected = ["{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Input validation error: Invalid arguments for tool echo: Missing field: text\"}],\"isError\":true},\"jsonrpc\":\"2.0\",\"id\":4}"]
+	Session.run(unchecked, Bool.False, [call("4", "{\"name\":\"echo\",\"arguments\":{}}")], script) == expected
+		and Session.run(one_off, Bool.False, [call("4", "{\"name\":\"echo\",\"arguments\":{}}")], script) == expected
+}
 
 # A JSON tool gets any object; extra arguments are fine.
 expect run([call("23", "{\"name\":\"noargs\",\"arguments\":{\"x\":1}}")]) == ["{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"jsonrpc\":\"2.0\",\"id\":23}"]
@@ -108,9 +127,21 @@ expect run([call("23", "{\"name\":\"noargs\",\"arguments\":{\"x\":1}}")]) == ["{
 # Unknown and disabled tools; malformed params.
 expect run([call("6", "{\"name\":\"nope\"}")]) == ["{\"jsonrpc\":\"2.0\",\"id\":6,\"error\":{\"code\":-32602,\"message\":\"Tool nope not found\"}}"]
 expect run([call("7", "{\"name\":\"hidden\"}")]) == ["{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"Tool hidden disabled\"}}"]
-expect Session.first_has(run([call("25", "{}")]), "{\"jsonrpc\":\"2.0\",\"id\":25,\"error\":{\"code\":-32602,\"message\":\"Invalid tools/call request: ")
-expect Session.first_has(run(["{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\"}"]), "{\"jsonrpc\":\"2.0\",\"id\":26,\"error\":{\"code\":-32602,")
-expect Session.first_has(run([call("27", "{\"name\":\"noargs\",\"arguments\":5}")]), "\"code\":-32602,\"message\":\"Invalid tools/call request: arguments must be an object\"")
+# Malformed params: -32602 with zod's issue list, as JS prints it (JSON.stringify(issues, null, 2)).
+invalid_request : Str, Str -> List(Str)
+invalid_request = |id, issues| {
+	line : JsonValue
+	line = Object([("jsonrpc", String("2.0")), ("id", Number(id)), ("error", Object([("code", Number("-32602")), ("message", String("Invalid tools/call request: ${issues}"))]))])
+	[line.to_str()]
+}
+
+expect run([call("25", "{}")]) == invalid_request("25", "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"name\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]")
+expect run(["{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"tools/call\"}"]) == invalid_request("26", "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\"\n    ],\n    \"message\": \"Invalid input: expected object, received undefined\"\n  }\n]")
+expect run([call("27", "{\"name\":\"noargs\",\"arguments\":5}")]) == invalid_request("27", "[\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received number\"\n  }\n]")
+expect run([call("28", "{\"name\":\"noargs\",\"arguments\":null}")]) == invalid_request("28", "[\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received null\"\n  }\n]")
+expect run([call("29", "{\"name\":5,\"arguments\":5}")]) == invalid_request("29", "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"name\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received number\"\n  }\n]")
+# The request check comes before the tool lookup (JS).
+expect run([call("30", "{\"name\":\"nope\",\"arguments\":[1]}")]) == invalid_request("30", "[\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"arguments\"\n    ],\n    \"message\": \"Invalid input: expected record, received array\"\n  }\n]")
 
 # Output schema without structured content: isError (JS text); an error result is left alone.
 expect run([call("1", "{\"name\":\"outschema\"}")]) == result("{\"content\":[{\"type\":\"text\",\"text\":\"Output validation error: Tool outschema has an output schema but no structured content was provided\"}],\"isError\":true}")

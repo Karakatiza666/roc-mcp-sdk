@@ -18,6 +18,7 @@ import Internal/Paging
 import Internal/Complete
 import Internal/Validate
 import Internal/Modern
+import SchemaCheck
 
 ## The pure protocol core. Transports feed it messages and run the handler calls it returns.
 ##
@@ -186,7 +187,7 @@ Engine :: [].{
 		message : JsonValue,
 		method : Str,
 		round : U64,
-		pending : List({ key : Str, out_id : Str }),
+		pending : List({ key : Str, out_id : U64 }),
 		answers : List((Str, Input.Answer)),
 		request_state : Try(Str, [None]),
 		deadline_ms : U64,
@@ -679,21 +680,33 @@ tools_call = |parts, sess, maybe_st, id, params, msg, rr|
 	if parts.tools.is_empty() {
 		not_found(sess, id)
 	} else {
-		match (params.get_or_null("name"), params.get_or_null("arguments")) {
-			(String(tool_name), args_raw) => {
-				args_ok = match args_raw {
-					Null => Ok(Object([]))
-					Object(fs) => Ok(Object(fs))
-					_ => Err(BadArgs)
+		issues = params_issues(present(msg, "params"), Bool.False)
+		match (issues, params.get_or_null("name"), params.get_or_null("arguments")) {
+			([], String(tool_name), args_raw) => {
+				args = match args_raw {
+					Object(fs) => Object(fs)
+					_ => Object([])
 				}
-				match (parts.tools.find_first(|t| t.tool.name() == tool_name), args_ok) {
-					(_, Err(BadArgs)) => error_reply(sess, id, McpError.invalid_params("Invalid tools/call request: arguments must be an object"))
-					(Err(_), _) => error_reply(sess, id, McpError.invalid_params("Tool ${tool_name} not found"))
-					(Ok(entry), Ok(args)) =>
+				match parts.tools.find_first(|t| t.tool.name() == tool_name) {
+					Err(_) => error_reply(sess, id, McpError.invalid_params("Tool ${tool_name} not found"))
+					Ok(entry) =>
 						if !(allowed(maybe_st, entry.enabled)) {
 							error_reply(sess, id, McpError.invalid_params("Tool ${tool_name} disabled"))
 						} else {
-							match (entry.prepare)(args) {
+							checked =
+								if parts.input_validation and entry.validate and entry.tool.has_input_schema() {
+									match SchemaCheck.validate(entry.tool.input_schema(), args) {
+										Ok(v) => Ok(v)
+										Err(Invalid(xs)) => Err("Invalid arguments for tool ${tool_name}: ${Str.join_with(xs, ", ")}")
+									}
+								} else {
+									Ok(args)
+								}
+							prepared = match checked {
+								Ok(v) => (entry.prepare)(v)
+								Err(why) => Err(why)
+							}
+							match prepared {
 								Err(why) => method_reply(parts, sess, id, "tools/call", Legacy.error_result("Input validation error: ${why}"))
 								Ok(h!) => {
 									composed! = compose_tool(parts.around_tools, tool_name, h!)
@@ -715,9 +728,58 @@ tools_call = |parts, sess, maybe_st, id, params, msg, rr|
 						}
 				}
 			}
-			_ => error_reply(sess, id, McpError.invalid_params("Invalid tools/call request: name must be a string"))
+			_ => error_reply(sess, id, McpError.invalid_params("Invalid tools/call request: ${Wire.pretty(Array(issues))}"))
 		}
 	}
+
+## A key of an object, or `Absent`.
+present : JsonValue, Str -> Try(JsonValue, [Absent])
+present = |v, k| match v.get(k) {
+	Ok(x) => Ok(x)
+	Err(_) => Err(Absent)
+}
+
+## A zod `invalid_type` issue as the JS SDK prints it in a request error.
+type_issue : List(Str), Str, Try(JsonValue, [Absent]) -> JsonValue
+type_issue = |path, expected, received|
+	Object([
+		("expected", String(expected)),
+		("code", String("invalid_type")),
+		("path", Array(path.map(|p| String(p)))),
+		("message", String("Invalid input: expected ${expected}, received ${SchemaCheck.type_name(received)}")),
+	])
+
+## The issues zod finds in the params of tools/call or prompts/get (the JS SDK's request
+## schemas): `params` an object, `name` a string, `arguments` absent or an object, whose
+## values must be strings for prompts/get.
+params_issues : Try(JsonValue, [Absent]), Bool -> List(JsonValue)
+params_issues = |p, string_values| match p {
+	Ok(Object(fs)) => {
+		v : JsonValue
+		v = Object(fs)
+		name_issue = match present(v, "name") {
+			Ok(String(_)) => []
+			other => [type_issue(["params", "name"], "string", other)]
+		}
+		args_issue = match present(v, "arguments") {
+			Err(Absent) => []
+			Ok(Object(args)) =>
+				if string_values {
+					args.keep_oks(
+						|(k, x)| match x {
+							String(_) => Err(Fine)
+							_ => Ok(type_issue(["params", "arguments", k], "string", Ok(x)))
+						},
+					)
+				} else {
+					[]
+				}
+			other => [type_issue(["params", "arguments"], "record", other)]
+		}
+		name_issue.concat(args_issue)
+	}
+	other => [type_issue(["params"], "object", other)]
+}
 
 resources_served : Server.Parts(state) -> Bool
 resources_served = |parts| !(parts.resources.is_empty()) or !(parts.templates.is_empty())
@@ -874,19 +936,37 @@ prompts_get = |parts, sess, maybe_st, id, params, msg, rr|
 	if parts.prompts.is_empty() {
 		not_found(sess, id)
 	} else {
-		match params.get_or_null("name") {
-			String(prompt_name) =>
+		issues = params_issues(present(msg, "params"), Bool.True)
+		match (issues, params.get_or_null("name")) {
+			([], String(prompt_name)) =>
 				match parts.prompts.find_first(|p| p.prompt.name() == prompt_name) {
 					Err(_) => error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} not found"))
 					Ok(entry) =>
 						if !(allowed(maybe_st, entry.enabled)) {
 							error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} disabled"))
 						} else {
-							args = match params.get_or_null("arguments") {
-								Object(fs) => Object(fs)
-								_ => Object([])
+							declared = entry.prompt.arguments()
+							checked =
+								if parts.input_validation and !(declared.is_empty()) {
+									match present(params, "arguments") {
+										Err(Absent) => Err("Invalid arguments for prompt ${prompt_name}: Invalid input: expected object, received undefined")
+										Ok(a) =>
+											match SchemaCheck.validate(prompt_schema(declared), a) {
+												Ok(v) => Ok(v)
+												Err(Invalid(xs)) => Err("Invalid arguments for prompt ${prompt_name}: ${Str.join_with(xs, ", ")}")
+											}
+									}
+								} else {
+									match params.get_or_null("arguments") {
+										Object(fs) => Ok(Object(fs))
+										_ => Ok(Object([]))
+									}
+								}
+							prepared = match checked {
+								Ok(args) => (entry.prepare)(args)
+								Err(why) => Err(why)
 							}
-							match (entry.prepare)(args) {
+							match prepared {
 								Err(why) => error_reply(sess, id, McpError.invalid_params(why))
 								Ok(h!) =>
 									make_call(
@@ -905,9 +985,20 @@ prompts_get = |parts, sess, maybe_st, id, params, msg, rr|
 							}
 						}
 				}
-			_ => error_reply(sess, id, McpError.invalid_params("Invalid prompts/get request: name must be a string"))
+
+			## JS: the request schema's zod issues, as an internal error.
+			_ => error_reply(sess, id, McpError.internal(Wire.pretty(Array(issues))))
 		}
 	}
+
+## The JSON Schema of a prompt's arguments, as the JS SDK's `argsSchema` of strings.
+prompt_schema : List(Prompt.Argument) -> JsonValue
+prompt_schema = |declared|
+	Object([
+		("type", String("object")),
+		("properties", Object(declared.map(|a| (a.name, Object([("type", String("string"))]))))),
+		("required", Array(declared.keep_if(|a| a.required).map(|a| String(a.name)))),
+	])
 
 completions_served : Server.Parts(state) -> Bool
 completions_served = |parts| parts.templates.any(|t| !(t.complete.is_empty())) or parts.prompts.any(|p| !(p.complete.is_empty()))
@@ -1018,12 +1109,13 @@ cancel_parked = |sess, params| {
 ## An answer to a server-to-client request.
 answer_received : Server.Parts(state), Engine.Session, { id : JsonValue, answer : [Result(JsonValue), Error(JsonValue)] }, JsonValue -> Engine.Step(state)
 answer_received = |parts, sess, r, msg| {
-	out_id = match r.id {
-		String(s) => s
-		other => other.to_str()
+	unknown = { ..reply(sess, []), log: ["Received a response for an unknown message ID: ${msg.to_str()}"] }
+	out_id = match out_id_of(r.id) {
+		Ok(n) => n
+		Err(_) => return unknown
 	}
 	match sess.parked.find_first(|p| p.pending.any(|leg| leg.out_id == out_id)) {
-		Err(_) => { ..reply(sess, []), log: ["Received a response for an unknown message ID: ${msg.to_str()}"] }
+		Err(_) => unknown
 		Ok(p) => {
 			key = (p.pending.find_first(|leg| leg.out_id == out_id) ?? { key: "", out_id }).key
 			answer = match r.answer {
@@ -1071,12 +1163,17 @@ rerun = |parts, sess, msg, id, rr| {
 	}
 }
 
-## `NeedInput` on a 2025 connection: the input shim.
+## `NeedInput` on a 2025 connection: the input shim. Requests are sent in the form of the JS
+## direct calls, or of the JS `inputRequired` shim with `with_progress_token` (see `Input.Required`).
 need_input : Server.Parts(state), Engine.Session, Engine.Call(state), JsonValue, Str, Input.Required, U64 -> Engine.Step(state)
 need_input = |parts, sess, call, id, method, req, now_ms| {
 	round_no = call.ctx.round() + 1
 	requests = req.requests()
-	missing = requests.find_first(|(_, r)| Legacy.missing_capability(sess.client_capabilities, r))
+	shim_form = req.progress_token()
+	missing = if (shim_form) requests.find_first(|(_, r)| Legacy.missing_capability(sess.client_capabilities, r)) else Err(NotFound)
+	refused = if (shim_form) [] else requests.keep_oks(|(key, r)| Legacy.direct_refusal(sess.client_capabilities, r).map_ok(|why| (key, why)))
+	to_send = requests.drop_if(|(key, _)| refused.any(|(k, _)| k == key))
+	refused_answers = refused.map(|(key, why)| (key, Failed(McpError.internal(why))))
 	if !(Legacy.input_methods.contains(method)) {
 		error_reply(sess, id, McpError.internal("Handler for ${method} asked for input, but only tools/call, prompts/get and resources/read may"))
 	} else if round_no > Legacy.max_rounds {
@@ -1087,24 +1184,33 @@ need_input = |parts, sess, call, id, method, req, now_ms| {
 		match missing {
 			Ok((key, r)) => reply(sess, [shim_failure_line(id, method, Legacy.cannot_request(key, r.method()))])
 			Err(_) =>
-				if requests.is_empty() {
-					rerun(parts, sess, call.message, id, { inputs: [], request_state: req.request_state(), round: round_no })
-				} else {
-					first_n = sess.next_out_id
-					legs = requests.map_with_index(|(key, r), i| { key, out_id: "mcp-sdk-${(first_n + i).to_str()}", token: first_n + i, request: r })
-					lines = legs.map(|leg| Wire.request_line(String(leg.out_id), leg.request.method(), Legacy.request_params(leg.request, leg.token, leg.out_id)))
-					timeout = req.timeout_ms() ?? Legacy.default_round_timeout_ms
-					parked = {
-						id,
-						message: call.message,
-						method,
-						round: round_no,
-						pending: legs.map(|leg| { key: leg.key, out_id: leg.out_id }),
-						answers: [],
-						request_state: req.request_state(),
-						deadline_ms: now_ms + timeout,
-					}
-					reply({ ..sess, next_out_id: first_n + legs.len(), parked: sess.parked.append(parked) }, lines)
+				match (parts.input_failures, refused) {
+					(FailRequest, [(_, why), ..]) => reply(sess, [shim_failure_line(id, method, Legacy.fulfil_failed(method, why))])
+					_ =>
+						if to_send.is_empty() {
+							rerun(parts, sess, call.message, id, { inputs: refused_answers, request_state: req.request_state(), round: round_no })
+						} else {
+							first_n = sess.next_out_id
+							legs = to_send.map_with_index(|(key, r), i| { key, out_id: first_n + i, request: r })
+							lines = legs.map(
+								|leg| {
+									token = if (shim_form) Ok(leg.out_id) else Err(None)
+									Wire.request_line(JsonValue.from_u64(leg.out_id), leg.request.method(), Legacy.request_params(leg.request, token, "mcp-sdk-${leg.out_id.to_str()}"))
+								},
+							)
+							timeout = req.timeout_ms() ?? Legacy.default_round_timeout_ms
+							parked = {
+								id,
+								message: call.message,
+								method,
+								round: round_no,
+								pending: legs.map(|leg| { key: leg.key, out_id: leg.out_id }),
+								answers: refused_answers,
+								request_state: req.request_state(),
+								deadline_ms: now_ms + timeout,
+							}
+							reply({ ..sess, next_out_id: first_n + legs.len(), parked: sess.parked.append(parked) }, lines)
+						}
 				}
 		}
 	}
@@ -1169,7 +1275,7 @@ parked_to_json = |p| {
 		("message", p.message),
 		("method", String(p.method)),
 		("round", JsonValue.from_u64(p.round)),
-		("pending", Array(p.pending.map(|leg| Object([("key", String(leg.key)), ("outId", String(leg.out_id))])))),
+		("pending", Array(p.pending.map(|leg| Object([("key", String(leg.key)), ("outId", JsonValue.from_u64(leg.out_id))])))),
 		("answers", Array(p.answers.map(answer_to_json))),
 		("requestState", rs),
 		("deadlineMs", JsonValue.from_u64(p.deadline_ms)),
@@ -1187,6 +1293,22 @@ answer_to_json = |(key, a)| {
 	Object([("key", String(key))].concat(body))
 }
 
+## The id of a server-to-client request from a response's `id`, as JS matches it
+## (`Number(id)`): an integer, or a string of decimal digits.
+out_id_of : JsonValue -> Try(U64, [NotOurs])
+out_id_of = |id| match id {
+	Number(t) => U64.from_str(t).map_err(|_| NotOurs)
+	String(s) => U64.from_str(s.trim()).map_err(|_| NotOurs)
+	_ => Err(NotOurs)
+}
+
+## A stored `outId`: a number, or `"mcp-sdk-<n>"` in a session stored by release 0.1.
+stored_out_id : JsonValue -> Try(U64, [NotOurs])
+stored_out_id = |id| match id {
+	String(s) => out_id_of(String(s.drop_prefix("mcp-sdk-")))
+	other => out_id_of(other)
+}
+
 parked_from_json : JsonValue -> Try(Engine.Parked, [BadSession(Str)])
 parked_from_json = |j| {
 	bad = |_| BadSession("parked")
@@ -1194,7 +1316,11 @@ parked_from_json = |j| {
 		Ok(Array(xs)) =>
 			xs.map_try(
 				|x| match (x.get("key"), x.get("outId")) {
-					(Ok(String(k)), Ok(String(o))) => Ok({ key: k, out_id: o })
+					(Ok(String(k)), Ok(o)) =>
+						match stored_out_id(o) {
+							Ok(n) => Ok({ key: k, out_id: n })
+							Err(_) => Err(BadSession("parked"))
+						}
 					_ => Err(BadSession("parked"))
 				},
 			)

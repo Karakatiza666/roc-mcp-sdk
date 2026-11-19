@@ -70,6 +70,11 @@ expect {
 	r.request_state() == Err(None) and r.timeout_ms() == Err(None)
 }
 
+# The wire form: the JS direct calls by default, the JS inputRequired shim on request.
+expect !(Input.Required.one("roots", ListRoots).progress_token())
+expect Input.Required.one("roots", ListRoots).with_progress_token(Bool.True).progress_token()
+expect !(Input.Required.keep_state("s").progress_token())
+
 # ---- roots ----
 
 expect {
@@ -81,7 +86,31 @@ expect Input.roots(json("{}")) == Err(BadAnswer("missing roots"))
 expect Input.roots(json("{\"roots\":{}}")) == Err(BadAnswer("roots is not an array"))
 expect Input.roots(json("{\"roots\":[{\"name\":\"x\"}]}")) == Err(BadAnswer("root without uri"))
 expect Input.roots(json("{\"roots\":[{\"uri\":1}]}")) == Err(BadAnswer("root uri is not a string"))
-expect Input.roots(json("{\"roots\":[{\"uri\":\"u\",\"name\":2}]}")) == Err(BadAnswer("root name is not a string"))
+expect Input.roots(json("{\"roots\":[{\"uri\":\"file:///u\",\"name\":2}]}")) == Err(BadAnswer("root name is not a string"))
+# Every root URI must start with file:// (JS validates the roots/list result; zod's path and text).
+expect Input.roots(json("{\"roots\":[{\"uri\":\"https://x\"}]}")) == Err(BadAnswer("roots.0.uri: Invalid string: must start with \"file://\""))
+expect Input.roots(json("{\"roots\":[{\"uri\":\"file:///a\",\"name\":\"n\"},{\"uri\":\"x\"}]}")) == Err(BadAnswer("roots.1.uri: Invalid string: must start with \"file://\""))
+
+# ---- file_uri_to_path: Node's fileURLToPath on POSIX (captured from node) ----
+
+expect Input.file_uri_to_path("file:///a%20b/c") == Ok("/a b/c")
+expect Input.file_uri_to_path("file://localhost/x/y") == Ok("/x/y")
+expect Input.file_uri_to_path("file:///a%2Fb") == Err(NotAFileUri)
+expect Input.file_uri_to_path("file:///a%2fb") == Err(NotAFileUri)
+expect Input.file_uri_to_path("file://host/x") == Err(NotAFileUri)
+expect Input.file_uri_to_path("file:///a?q=1#h") == Ok("/a")
+expect Input.file_uri_to_path("file:///%E2%82%AC") == Ok("/€")
+expect Input.file_uri_to_path("file:///a%zz") == Err(NotAFileUri)
+expect Input.file_uri_to_path("file:///%ff") == Err(NotAFileUri)
+expect Input.file_uri_to_path("file:///") == Ok("/")
+expect Input.file_uri_to_path("file://") == Ok("/")
+expect Input.file_uri_to_path("file:///a/../b") == Ok("/b")
+expect Input.file_uri_to_path("file:///a/./b") == Ok("/a/b")
+expect Input.file_uri_to_path("file:///a//b") == Ok("/a//b")
+expect Input.file_uri_to_path("file:///a b") == Ok("/a b")
+expect Input.file_uri_to_path("file:///A%3a") == Ok("/A:")
+expect Input.file_uri_to_path("file:///home/u/my%20project/") == Ok("/home/u/my project/")
+expect Input.file_uri_to_path("https://x/a") == Err(NotAFileUri)
 expect Input.roots(json("[]")) == Err(BadAnswer("missing roots"))
 
 # ---- elicitation ----
