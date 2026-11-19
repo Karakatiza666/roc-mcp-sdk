@@ -2,6 +2,6 @@
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true},"elicitation":{}},"clientInfo":{"name":"e2e","version":"1.0.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"confirm","arguments":{}}}
-{"jsonrpc":"2.0","id":"mcp-sdk-0","result":{"action":"accept","content":{"ok":true}}}
+{"jsonrpc":"2.0","id":0,"result":{"action":"accept","content":{"ok":true}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"confirm","arguments":{}}}
-{"jsonrpc":"2.0","id":"mcp-sdk-1","result":{"action":"decline"}}
+{"jsonrpc":"2.0","id":1,"result":{"action":"decline"}}

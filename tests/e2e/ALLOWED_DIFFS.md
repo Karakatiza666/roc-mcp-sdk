@@ -10,14 +10,14 @@ adds is preceded by a `# ALLOWED_DIFF <rule>` comment in the `.out.jsonl` file.
 | # | Where | JS | Roc | Why |
 | --- | --- | --- | --- | --- |
 | D1 | a line that is not JSON (`basics`) | skipped silently | `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}` | The JSON-RPC spec answers a parse error. DESIGN 5 "Framing", open question Q1 (default -32700). |
-| D2 | arguments that do not decode (`basics` tool `echo`, `prompts_bad` prompt `greet`) | `Invalid arguments for tool echo: text: Invalid input: expected string, received undefined` (zod's text) | `Invalid arguments for tool echo: Missing field: text` (the `Encoding.Json` decoder's text) | Arguments are validated by decoding into a Roc type, not by zod (DESIGN 7, tools row). The prefix, the error kind (`isError` result for a tool, -32602 for a prompt) and the field are the same; only the detail text differs. |
+
+D2 (argument validation text) was removed: tools/call and prompts/get arguments are now checked
+against the input schema with zod's messages (`SchemaCheck`), so the texts are JS's.
+Server-to-client request ids are integers from 0, as in JS, so the transcripts answer with the
+ids both sides send and need no rewriting.
 
 ## Harness rules (not differences)
 
-- **Server-to-client request ids.** Roc sends `"mcp-sdk-<n>"`, JS the integer `<n>`, from the
-  same counter starting at 0. The transcripts answer with the Roc ids; `js/drive.mjs` rewrites
-  them to integers for JS and rewrites JS's ids (and `notifications/cancelled` `requestId`s)
-  back. Both ids are valid JSON-RPC; clients echo whatever they get.
 - **Order.** The JS SDK runs handlers concurrently, so `scripts/e2e.sh` compares the multiset
   of canonical messages (sorted keys, numbers by value), not their order. `drive.mjs` paces the
   lines (150 ms) so that a client answer never reaches JS before the request it answers.
