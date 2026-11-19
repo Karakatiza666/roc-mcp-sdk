@@ -219,14 +219,14 @@ Engine :: [].{
 	receive = |server, sess, st, line| {
 		text = line.drop_suffix("\r")
 		if text.count_utf8_bytes() > Wire.max_line_bytes {
-			{ ..reply(sess, [Wire.error_line(Null, McpError.new(-32600, "Invalid Request"))]), log: ["Refused a message of ${text.count_utf8_bytes().to_str()} bytes (the limit is 10 MB)"] }
-		} else if text.trim() == "" {
-			reply(sess, [])
-		} else {
-			match JsonValue.parse(text) {
-				Ok(msg) => receive_json(server, sess, st, msg)
-				Err(InvalidJson(why)) => { ..reply(sess, [Wire.error_line(Null, McpError.new(-32700, "Parse error"))]), log: ["Parse error: ${why}"] }
-			}
+			return { ..reply(sess, [Wire.error_line(Null, McpError.new(-32600, "Invalid Request"))]), log: ["Refused a message of ${text.count_utf8_bytes().to_str()} bytes (the limit is 10 MB)"] }
+		}
+		if text.trim() == "" {
+			return reply(sess, [])
+		}
+		match JsonValue.parse(text) {
+			Ok(msg) => receive_json(server, sess, st, msg)
+			Err(InvalidJson(why)) => { ..reply(sess, [Wire.error_line(Null, McpError.new(-32700, "Parse error"))]), log: ["Parse error: ${why}"] }
 		}
 	}
 
@@ -244,25 +244,28 @@ Engine :: [].{
 
 	## The outcome of a Call: a response, or (2025) server-to-client requests and a parked request.
 	finish : Server(state), Engine.Session, Engine.Call(state), Outcome(JsonValue), U64 -> Engine.Step(state)
-	finish = |server, sess, call, outcome, now_ms| match call.request_id {
-		Err(Notification) => reply(sess, [])
-		Ok(id) => {
-			parts = server.parts()
-			method = call.ctx.method()
-			match outcome {
-				Done(raw) => reply(sess, [done_line(parts, sess, call.message, method, id, raw)])
-				Fail(e) => reply(sess, [Wire.error_line(id, legacy_error(e))])
-				NeedInput(req) =>
-					if sess.era == Modern {
-						# 2026-07-28: the client gets `input_required` and retries with the answers.
-						match Modern.input_required(method, req, call.ctx.client_capabilities()) {
-							Ok(j) => reply(sess, [result_line(parts, sess, id, method, j)])
-							Err(e) => error_reply(sess, id, e)
-						}
-					} else {
-						need_input(parts, sess, call, id, method, req, now_ms)
-					}
+	finish = |server, sess, call, outcome, now_ms| {
+		id = match call.request_id {
+			Ok(i) => i
+			Err(Notification) => {
+				return reply(sess, [])
 			}
+		}
+		parts = server.parts()
+		method = call.ctx.method()
+		match outcome {
+			Done(raw) => reply(sess, [done_line(parts, sess, call.message, method, id, raw)])
+			Fail(e) => reply(sess, [Wire.error_line(id, legacy_error(e))])
+			NeedInput(req) =>
+				if sess.era == Modern {
+					# 2026-07-28: the client gets `input_required` and retries with the answers.
+					match Modern.input_required(method, req, call.ctx.client_capabilities()) {
+						Ok(j) => reply(sess, [result_line(parts, sess, id, method, j)])
+						Err(e) => error_reply(sess, id, e)
+					}
+				} else {
+					need_input(parts, sess, call, id, method, req, now_ms)
+				}
 		}
 	}
 
@@ -270,8 +273,11 @@ Engine :: [].{
 	## again with `TimedOut` answers (or fails the request, see `Server.with_input_failures`).
 	expire : Server(state), Engine.Session, state, U64 -> Engine.Step(state)
 	expire = |server, sess, _st, now_ms| {
-		parts = server.parts()
 		due = sess.parked.keep_if(|p| p.deadline_ms <= now_ms)
+		if due.is_empty() {
+			return reply(sess, [])
+		}
+		parts = server.parts()
 		start = { ..reply(sess, []), session: { ..sess, parked: sess.parked.drop_if(|p| p.deadline_ms <= now_ms) } }
 		due.fold(
 			start,
@@ -317,6 +323,11 @@ Engine :: [].{
 	close = |sess| Modern.final_results(sess.subscriptions)
 }
 
+## Build time (DESIGN 12.21): each function below that takes `Server.Parts` starts with an early
+## `return` (a guard such as "no tools: -32601"). A body with a non-tail `return` is never inlined,
+## so each stays one procedure; without them an optimized build inlined the whole engine into
+## `Stdio.serve!` several times over, and `examples/hello.roc` took over 600 s to build.
+
 ## The 2026-07-28 era (`Internal/Modern.roc`). The first request or notification picks the era
 ## of the connection, as JS `serveStdio` does (DESIGN 5, "Era selection"); responses and invalid
 ## messages leave it undecided. `server/discover` makes a probe session (`era: Modern`,
@@ -326,10 +337,11 @@ Engine :: [].{
 ## `result_line` encodes for the era.
 
 route_request : Server(state), Server.Parts(state), Engine.Session, state, { id : JsonValue, method : Str, params : JsonValue }, JsonValue -> Engine.Step(state)
-route_request = |server, parts, sess, st, r, msg|
+route_request = |server, parts, sess, st, r, msg| {
 	if sess.era == Legacy {
-		legacy_request(server, parts, sess, st, r, msg)
-	} else if sess.era == Modern and !sess.probe {
+		return legacy_request(server, parts, sess, st, r, msg)
+	}
+	if sess.era == Modern and !sess.probe {
 		if r.method == "initialize" and !(Modern.valid_claim(r.params)) {
 			{ ..error_reply(sess, r.id, Modern.legacy_rejection(r.method, r.params, parts.versions.modern)), log: ["Rejected a 2025-era initialize on a 2026-07-28 connection"] }
 		} else {
@@ -351,12 +363,14 @@ route_request = |server, parts, sess, st, r, msg|
 				}
 		}
 	}
+}
 
 route_notification : Server.Parts(state), Engine.Session, { method : Str, params : JsonValue }, JsonValue -> Engine.Step(state)
-route_notification = |parts, sess, n, msg|
+route_notification = |parts, sess, n, msg| {
 	if sess.era == Legacy {
-		legacy_notification(parts, sess, n, msg)
-	} else if sess.era == Modern and !sess.probe {
+		return legacy_notification(parts, sess, n, msg)
+	}
+	if sess.era == Modern and !sess.probe {
 		modern_notification(parts, sess, n, msg)
 	} else {
 		match Modern.opening(n.method, n.params, parts.versions.modern) {
@@ -376,6 +390,7 @@ route_notification = |parts, sess, n, msg|
 				}
 		}
 	}
+}
 
 ## A probe session is dropped when the client falls back to 2025 (JS discards the probe instance).
 leave_probe : Engine.Session -> Engine.Session
@@ -398,46 +413,47 @@ served = |parts, method| match method {
 }
 
 modern_request : Server(state), Server.Parts(state), Engine.Session, state, { id : JsonValue, method : Str, params : JsonValue }, JsonValue -> Engine.Step(state)
-modern_request = |server, parts, sess, st, r, msg|
+modern_request = |server, parts, sess, st, r, msg| {
 	if r.method == "subscriptions/listen" {
-		listen(server, parts, sess, r)
-	} else if Modern.removed_request(r.method) or !(served(parts, r.method)) {
-		not_found(sess, r.id)
-	} else {
-		match Modern.envelope_error(r.params) {
-			Err(why) => error_reply(sess, r.id, McpError.invalid_params(why))
-			Ok({}) =>
-				if r.method == "server/discover" {
-					reply(sess, [result_line(parts, sess, r.id, r.method, Modern.discover_result(parts.versions.modern, server.capabilities(), parts.instructions))])
-				} else {
-					inputs = Modern.input_responses(r.params)
-					retried = r.params.get("inputResponses").is_ok() or r.params.get("requestState").is_ok()
-					rr0 = { inputs, request_state: Err(None), round: if (retried) 1 else 0 }
-					bad_state = McpError.invalid_params("Invalid or expired requestState").with_data(Object([("reason", String("invalid_request_state"))]))
-					checked =
-						if Modern.input_methods.contains(r.method) {
-							match r.params.get("requestState") {
-								Err(_) => Ok(rr0)
-								Ok(String(rs)) => {
-									rr1 = { ..rr0, request_state: Ok(rs) }
-									ok = match parts.verify_request_state {
-										Ok(verify) => verify(make_ctx(parts, sess, Ok(r.id), r.method, r.params, rr1), rs)
-										Err(None) => Bool.True
-									}
-									if (ok) Ok(rr1) else Err(bad_state)
-								}
-								Ok(_) => Err(bad_state)
-							}
-						} else {
-							Ok(rr0)
-						}
-					match checked {
-						Ok(rr) => dispatch(parts, sess, Ok(st), r.id, r.method, r.params, msg, rr)
-						Err(e) => error_reply(sess, r.id, e)
-					}
-				}
-		}
+		return listen(server, parts, sess, r)
 	}
+	if Modern.removed_request(r.method) or !(served(parts, r.method)) {
+		return not_found(sess, r.id)
+	}
+	match Modern.envelope_error(r.params) {
+		Err(why) => error_reply(sess, r.id, McpError.invalid_params(why))
+		Ok({}) =>
+			if r.method == "server/discover" {
+				reply(sess, [result_line(parts, sess, r.id, r.method, Modern.discover_result(parts.versions.modern, server.capabilities(), parts.instructions))])
+			} else {
+				inputs = Modern.input_responses(r.params)
+				retried = r.params.get("inputResponses").is_ok() or r.params.get("requestState").is_ok()
+				rr0 = { inputs, request_state: Err(None), round: if (retried) 1 else 0 }
+				bad_state = McpError.invalid_params("Invalid or expired requestState").with_data(Object([("reason", String("invalid_request_state"))]))
+				checked =
+					if Modern.input_methods.contains(r.method) {
+						match r.params.get("requestState") {
+							Err(_) => Ok(rr0)
+							Ok(String(rs)) => {
+								rr1 = { ..rr0, request_state: Ok(rs) }
+								ok = match parts.verify_request_state {
+									Ok(verify) => verify(make_ctx(parts, sess, Ok(r.id), r.method, r.params, rr1), rs)
+									Err(None) => Bool.True
+								}
+								if (ok) Ok(rr1) else Err(bad_state)
+							}
+							Ok(_) => Err(bad_state)
+						}
+					} else {
+						Ok(rr0)
+					}
+				match checked {
+					Ok(rr) => dispatch(parts, sess, Ok(st), r.id, r.method, r.params, msg, rr)
+					Err(e) => error_reply(sess, r.id, e)
+				}
+			}
+	}
+}
 
 ## `subscriptions/listen` (stdio): the acknowledgement, or an error. The subscription ends with
 ## `notifications/cancelled` or, on shutdown, with its final result (`close`).
@@ -462,8 +478,9 @@ modern_notification : Server.Parts(state), Engine.Session, { method : Str, param
 modern_notification = |parts, sess, n, msg| {
 	target = n.params.get_or_null("requestId")
 	if n.method == "notifications/cancelled" and sess.subscriptions.any(|x| x.get_or_null("id") == target) {
-		reply({ ..sess, subscriptions: sess.subscriptions.drop_if(|x| x.get_or_null("id") == target) }, [])
-	} else if Modern.removed_notification(n.method) {
+		return reply({ ..sess, subscriptions: sess.subscriptions.drop_if(|x| x.get_or_null("id") == target) }, [])
+	}
+	if Modern.removed_notification(n.method) {
 		reply(sess, [])
 	} else {
 		legacy_notification(parts, sess, n, msg)
@@ -473,19 +490,19 @@ modern_notification = |parts, sess, n, msg| {
 ## The response line of a result, encoded for the session's era (2026-07-28: `resultType`,
 ## the cache fields and serverInfo, see `Modern.encode_result`).
 result_line : Server.Parts(state), Engine.Session, JsonValue, Str, JsonValue -> Str
-result_line = |parts, sess, id, method, result|
-	if sess.era == Modern {
-		hint = match parts.cache_hints.keep_if(|(m, _)| m == method).last() {
-			Ok((_, h)) => Ok(h)
-			Err(_) => Err(None)
-		}
-		match Modern.encode_result(method, result, parts.info, hint) {
-			Ok(j) => Wire.result_line(id, j)
-			Err(e) => Wire.error_line(id, e)
-		}
-	} else {
-		Wire.result_line(id, result)
+result_line = |parts, sess, id, method, result| {
+	if sess.era != Modern {
+		return Wire.result_line(id, result)
 	}
+	hint = match parts.cache_hints.keep_if(|(m, _)| m == method).last() {
+		Ok((_, h)) => Ok(h)
+		Err(_) => Err(None)
+	}
+	match Modern.encode_result(method, result, parts.info, hint) {
+		Ok(j) => Wire.result_line(id, j)
+		Err(e) => Wire.error_line(id, e)
+	}
+}
 
 method_reply : Server.Parts(state), Engine.Session, JsonValue, Str, JsonValue -> Engine.Step(state)
 method_reply = |parts, sess, id, method, result| reply(sess, [result_line(parts, sess, id, method, result)])
@@ -526,32 +543,32 @@ first_call : Rerun
 first_call = { inputs: [], request_state: Err(None), round: 0 }
 
 make_ctx : Server.Parts(state), Engine.Session, Try(JsonValue, [Notification]), Str, JsonValue, Rerun -> Ctx
-make_ctx = |parts, sess, rid, method, params, rr|
-	if sess.era == Modern {
-		env = Modern.envelope(params)
-		Ctx.new({
-			request_id: rid,
-			method,
-			era: Modern,
-			protocol_version: if (env.version == "") sess.protocol_version else env.version,
-			client_capabilities: env.capabilities,
-			client_info: env.info,
-			meta: env.meta,
-			inputs: rr.inputs,
-			request_state: rr.request_state,
-			log_threshold: match env.log_level {
-				Ok(l) => AtLeast(l)
-				Err(None) => Nothing
-			},
-			logging_enabled: parts.logging,
-			session_id: sess.session_id,
-			auth: sess.auth,
-			round: rr.round,
-		})
-			.with_subscriptions(sess.subscriptions)
-	} else {
-		legacy_ctx(parts, sess, rid, method, params, rr)
+make_ctx = |parts, sess, rid, method, params, rr| {
+	if sess.era != Modern {
+		return legacy_ctx(parts, sess, rid, method, params, rr)
 	}
+	env = Modern.envelope(params)
+	Ctx.new({
+		request_id: rid,
+		method,
+		era: Modern,
+		protocol_version: if (env.version == "") sess.protocol_version else env.version,
+		client_capabilities: env.capabilities,
+		client_info: env.info,
+		meta: env.meta,
+		inputs: rr.inputs,
+		request_state: rr.request_state,
+		log_threshold: match env.log_level {
+			Ok(l) => AtLeast(l)
+			Err(None) => Nothing
+		},
+		logging_enabled: parts.logging,
+		session_id: sess.session_id,
+		auth: sess.auth,
+		round: rr.round,
+	})
+		.with_subscriptions(sess.subscriptions)
+}
 
 legacy_ctx : Server.Parts(state), Engine.Session, Try(JsonValue, [Notification]), Str, JsonValue, Rerun -> Ctx
 legacy_ctx = |parts, sess, rid, method, params, rr|
@@ -590,17 +607,17 @@ allowed = |maybe_st, pred| match maybe_st {
 }
 
 legacy_request : Server(state), Server.Parts(state), Engine.Session, state, { id : JsonValue, method : Str, params : JsonValue }, JsonValue -> Engine.Step(state)
-legacy_request = |server, parts, sess, st, r, msg|
+legacy_request = |server, parts, sess, st, r, msg| {
 	if parts.versions.legacy.is_empty() {
-		error_reply(sess, r.id, Modern.legacy_rejection(r.method, r.params, parts.versions.modern))
-	} else {
-		match r.method {
-			"initialize" => initialize(server, parts, sess, r.id, r.params)
-			"ping" => result_reply(sess, r.id, Object([]))
-			"logging/setLevel" => set_level(parts, sess, r.id, r.params)
-			_ => dispatch(parts, sess, Ok(st), r.id, r.method, r.params, msg, first_call)
-		}
+		return error_reply(sess, r.id, Modern.legacy_rejection(r.method, r.params, parts.versions.modern))
 	}
+	match r.method {
+		"initialize" => initialize(server, parts, sess, r.id, r.params)
+		"ping" => result_reply(sess, r.id, Object([]))
+		"logging/setLevel" => set_level(parts, sess, r.id, r.params)
+		_ => dispatch(parts, sess, Ok(st), r.id, r.method, r.params, msg, first_call)
+	}
+}
 
 initialize : Server(state), Server.Parts(state), Engine.Session, JsonValue, JsonValue -> Engine.Step(state)
 initialize = |server, parts, sess, id, params| {
@@ -627,19 +644,19 @@ initialize = |server, parts, sess, id, params| {
 }
 
 set_level : Server.Parts(state), Engine.Session, JsonValue, JsonValue -> Engine.Step(state)
-set_level = |parts, sess, id, params|
+set_level = |parts, sess, id, params| {
 	if !parts.logging {
-		not_found(sess, id)
-	} else {
-		match params.get_or_null("level") {
-			String(l) =>
-				match LogLevel.from_str(l) {
-					Ok(level) => result_reply({ ..sess, log_level: Ok(level) }, id, Object([]))
-					Err(_) => error_reply(sess, id, McpError.invalid_params("Invalid params: level must be one of ${Str.join_with(LogLevel.all.map(|x| x.to_str()), ", ")}"))
-				}
-			_ => error_reply(sess, id, McpError.invalid_params("Invalid params: level must be a string"))
-		}
+		return not_found(sess, id)
 	}
+	match params.get_or_null("level") {
+		String(l) =>
+			match LogLevel.from_str(l) {
+				Ok(level) => result_reply({ ..sess, log_level: Ok(level) }, id, Object([]))
+				Err(_) => error_reply(sess, id, McpError.invalid_params("Invalid params: level must be one of ${Str.join_with(LogLevel.all.map(|x| x.to_str()), ", ")}"))
+			}
+		_ => error_reply(sess, id, McpError.invalid_params("Invalid params: level must be a string"))
+	}
+}
 
 ## The methods whose handlers the app registered (and the list methods).
 dispatch : Server.Parts(state), Engine.Session, Try(state, [NoState]), JsonValue, Str, JsonValue, JsonValue, Rerun -> Engine.Step(state)
@@ -654,11 +671,15 @@ dispatch = |parts, sess, maybe_st, id, method, params, msg, rr| match method {
 	"prompts/list" => prompts_list(parts, sess, maybe_st, id, params)
 	"prompts/get" => prompts_get(parts, sess, maybe_st, id, params, msg, rr)
 	"completion/complete" => complete(parts, sess, maybe_st, id, params, msg)
-	_ =>
-		match parts.request_handlers.find_first(|(m, _)| m == method) {
-			Ok((_, h!)) => make_call(parts, sess, id, method, params, msg, rr, |s0, c| h!(s0, c, params))
-			Err(_) => not_found(sess, id)
+	_ => {
+		(_, h!) = match parts.request_handlers.find_first(|(m, _)| m == method) {
+			Ok(found) => found
+			Err(_) => {
+				return not_found(sess, id)
+			}
 		}
+		make_call(parts, sess, id, method, params, msg, rr, |s0, c| h!(s0, c, params))
+	}
 }
 
 ## A page of a list method, or -32602 for a bad cursor.
@@ -676,13 +697,13 @@ legacy_tool_json = |t| match t.output_schema() {
 }
 
 tools_list : Server.Parts(state), Engine.Session, Try(state, [NoState]), JsonValue, JsonValue -> Engine.Step(state)
-tools_list = |parts, sess, maybe_st, id, params|
+tools_list = |parts, sess, maybe_st, id, params| {
 	if parts.tools.is_empty() {
-		not_found(sess, id)
-	} else {
-		visible = parts.tools.keep_if(|t| allowed(maybe_st, t.enabled))
-		paged(parts, sess, id, "tools/list", params, "tools", visible.map(|t| if (sess.era == Modern) t.tool.to_json() else legacy_tool_json(t.tool)))
+		return not_found(sess, id)
 	}
+	visible = parts.tools.keep_if(|t| allowed(maybe_st, t.enabled))
+	paged(parts, sess, id, "tools/list", params, "tools", visible.map(|t| if (sess.era == Modern) t.tool.to_json() else legacy_tool_json(t.tool)))
+}
 
 ## Composes the middlewares around a tool call, the first registered outermost.
 compose_tool : List(Server.Middleware(state)), Str, (state, Ctx => (state, Outcome(ToolResult))) -> (state, Ctx => (state, Outcome(ToolResult)))
@@ -690,54 +711,54 @@ compose_tool = |middlewares, tool_name, inner!|
 	middlewares.fold_rev(inner!, |mw!, next!| |s0, c| mw!(s0, c, tool_name, |s1| next!(s1, c)))
 
 tools_call : Server.Parts(state), Engine.Session, Try(state, [NoState]), JsonValue, JsonValue, JsonValue, Rerun -> Engine.Step(state)
-tools_call = |parts, sess, maybe_st, id, params, msg, rr|
+tools_call = |parts, sess, maybe_st, id, params, msg, rr| {
 	if parts.tools.is_empty() {
-		not_found(sess, id)
-	} else {
-		issues = params_issues(present(msg, "params"), Bool.False)
-		name_ok = if (issues.is_empty()) params.get_or_null("name") else Null
-		match (name_ok, params.get_or_null("arguments")) {
-			(String(tool_name), args_raw) => {
-				args = match args_raw {
-					Object(fs) => Object(fs)
-					_ => Object([])
-				}
-				match parts.tools.find_first(|t| t.tool.name() == tool_name) {
-					Err(_) => error_reply(sess, id, McpError.invalid_params("Tool ${tool_name} not found"))
-					Ok(entry) =>
-						if !(allowed(maybe_st, entry.enabled)) {
-							error_reply(sess, id, McpError.invalid_params("Tool ${tool_name} disabled"))
-						} else {
-							checked = checked_tool_args(parts.input_validation and entry.validate, entry.tool, args)
-							prepared = match checked {
-								Ok(v) => (entry.prepare)(v)
-								Err(why) => Err(why)
-							}
-							match prepared {
-								Err(why) => method_reply(parts, sess, id, "tools/call", Legacy.error_result("Input validation error: ${why}"))
-								Ok(h!) => {
-									composed! = compose_tool(parts.around_tools, tool_name, h!)
-									make_call(
-										parts,
-										sess,
-										id,
-										"tools/call",
-										params,
-										msg,
-										rr,
-										|s0, c| {
-											(s1, o) = composed!(s0, c)
-											(s1, o.map(|r| r.to_json()))
-										},
-									)
-								}
+		return not_found(sess, id)
+	}
+	issues = params_issues(present(msg, "params"), Bool.False)
+	name_ok = if (issues.is_empty()) params.get_or_null("name") else Null
+	match (name_ok, params.get_or_null("arguments")) {
+		(String(tool_name), args_raw) => {
+			args = match args_raw {
+				Object(fs) => Object(fs)
+				_ => Object([])
+			}
+			match parts.tools.find_first(|t| t.tool.name() == tool_name) {
+				Err(_) => error_reply(sess, id, McpError.invalid_params("Tool ${tool_name} not found"))
+				Ok(entry) =>
+					if !(allowed(maybe_st, entry.enabled)) {
+						error_reply(sess, id, McpError.invalid_params("Tool ${tool_name} disabled"))
+					} else {
+						checked = checked_tool_args(parts.input_validation and entry.validate, entry.tool, args)
+						prepared = match checked {
+							Ok(v) => (entry.prepare)(v)
+							Err(why) => Err(why)
+						}
+						match prepared {
+							Err(why) => method_reply(parts, sess, id, "tools/call", Legacy.error_result("Input validation error: ${why}"))
+							Ok(h!) => {
+								composed! = compose_tool(parts.around_tools, tool_name, h!)
+								make_call(
+									parts,
+									sess,
+									id,
+									"tools/call",
+									params,
+									msg,
+									rr,
+									|s0, c| {
+										(s1, o) = composed!(s0, c)
+										(s1, o.map(|r| r.to_json()))
+									},
+								)
 							}
 						}
-				}
+					}
 			}
-			_ => error_reply(sess, id, McpError.invalid_params("Invalid tools/call request: ${Wire.pretty(Array(issues))}"))
 		}
+		_ => error_reply(sess, id, McpError.invalid_params("Invalid tools/call request: ${Wire.pretty(Array(issues))}"))
 	}
+}
 
 ## A key of an object, or `Absent`.
 present : JsonValue, Str -> Try(JsonValue, [Absent])
@@ -792,44 +813,44 @@ resources_served : Server.Parts(state) -> Bool
 resources_served = |parts| !(parts.resources.is_empty()) or !(parts.templates.is_empty())
 
 resources_list : Server.Parts(state), Engine.Session, Try(state, [NoState]), JsonValue, JsonValue, JsonValue -> Engine.Step(state)
-resources_list = |parts, sess, maybe_st, id, params, msg|
+resources_list = |parts, sess, maybe_st, id, params, msg| {
 	if !(resources_served(parts)) {
-		not_found(sess, id)
-	} else {
-		listers = parts.templates.keep_oks(|t| t.list!.map_err(|_| NoList))
-		if listers.is_empty() {
-			statics = parts.resources.keep_if(|r| allowed(maybe_st, r.enabled)).map(|r| r.resource.to_json())
-			paged(parts, sess, id, "resources/list", params, "resources", statics)
-		} else {
-			make_call(
-				parts,
-				sess,
-				id,
-				"resources/list",
-				params,
-				msg,
-				first_call,
-				|s0, c| {
-					var $s = s0
-					var $groups = []
-					for list! in listers {
-						(s1, found) = list!($s, c)
-						$s = s1
-						$groups = $groups.append(Array(found.map(|r| r.to_json())))
-					}
-					($s, Outcome.done(Array($groups)))
-				},
-			)
-		}
+		return not_found(sess, id)
 	}
+	listers = parts.templates.keep_oks(|t| t.list!.map_err(|_| NoList))
+	if listers.is_empty() {
+		statics = parts.resources.keep_if(|r| allowed(maybe_st, r.enabled)).map(|r| r.resource.to_json())
+		paged(parts, sess, id, "resources/list", params, "resources", statics)
+	} else {
+		make_call(
+			parts,
+			sess,
+			id,
+			"resources/list",
+			params,
+			msg,
+			first_call,
+			|s0, c| {
+				var $s = s0
+				var $groups = []
+				for list! in listers {
+					(s1, found) = list!($s, c)
+					$s = s1
+					$groups = $groups.append(Array(found.map(|r| r.to_json())))
+				}
+				($s, Outcome.done(Array($groups)))
+			},
+		)
+	}
+}
 
 templates_list : Server.Parts(state), Engine.Session, JsonValue, JsonValue -> Engine.Step(state)
-templates_list = |parts, sess, id, params|
+templates_list = |parts, sess, id, params| {
 	if !(resources_served(parts)) {
-		not_found(sess, id)
-	} else {
-		paged(parts, sess, id, "resources/templates/list", params, "resourceTemplates", parts.templates.map(|t| t.template.to_json()))
+		return not_found(sess, id)
 	}
+	paged(parts, sess, id, "resources/templates/list", params, "resourceTemplates", parts.templates.map(|t| t.template.to_json()))
+}
 
 ## A URI as JS `new URL` would accept it, roughly: a scheme, then anything without spaces.
 valid_uri : Str -> Bool
@@ -848,140 +869,144 @@ contents_json : List(ResourceContents) -> JsonValue
 contents_json = |cs| Object([("contents", Array(cs.map(|x| x.to_json())))])
 
 resources_read : Server.Parts(state), Engine.Session, Try(state, [NoState]), JsonValue, JsonValue, JsonValue, Rerun -> Engine.Step(state)
-resources_read = |parts, sess, maybe_st, id, params, msg, rr|
+resources_read = |parts, sess, maybe_st, id, params, msg, rr| {
 	if !(resources_served(parts)) {
-		not_found(sess, id)
-	} else {
-		match params.get_or_null("uri") {
-			String(uri) =>
-				if !(valid_uri(uri)) {
-					error_reply(sess, id, McpError.invalid_params("Resource URI ${uri} is invalid").with_data(Object([("uri", String(uri)), ("reason", String("invalid_uri"))])))
-				} else {
-					match parts.resources.find_first(|r| r.resource.uri() == uri and allowed(maybe_st, r.enabled)) {
-						Ok(entry) =>
-							make_call(
-								parts,
-								sess,
-								id,
-								"resources/read",
-								params,
-								msg,
-								rr,
-								|s0, c| {
-									(s1, o) = (entry.read!)(s0, c, uri)
-									(s1, o.map(contents_json))
-								},
-							)
-						Err(_) => {
-							matched = parts.templates.keep_oks(
-								|t| match t.template.uri_template().match_uri(uri) {
-									Ok(vars) => Ok((t, vars))
-									Err(NoMatch) => Err(NoMatch)
-								},
-							)
-							match matched.first() {
-								Ok((t, vars)) =>
-									make_call(
-										parts,
-										sess,
-										id,
-										"resources/read",
-										params,
-										msg,
-										rr,
-										|s0, c| {
-											(s1, o) = (t.read!)(s0, c, uri, vars)
-											(s1, o.map(contents_json))
-										},
-									)
-								Err(_) => error_reply(sess, id, McpError.resource_not_found(uri))
-							}
+		return not_found(sess, id)
+	}
+	match params.get_or_null("uri") {
+		String(uri) =>
+			if !(valid_uri(uri)) {
+				error_reply(sess, id, McpError.invalid_params("Resource URI ${uri} is invalid").with_data(Object([("uri", String(uri)), ("reason", String("invalid_uri"))])))
+			} else {
+				match parts.resources.find_first(|r| r.resource.uri() == uri and allowed(maybe_st, r.enabled)) {
+					Ok(entry) =>
+						make_call(
+							parts,
+							sess,
+							id,
+							"resources/read",
+							params,
+							msg,
+							rr,
+							|s0, c| {
+								(s1, o) = (entry.read!)(s0, c, uri)
+								(s1, o.map(contents_json))
+							},
+						)
+					Err(_) => {
+						matched = parts.templates.keep_oks(
+							|t| match t.template.uri_template().match_uri(uri) {
+								Ok(vars) => Ok((t, vars))
+								Err(NoMatch) => Err(NoMatch)
+							},
+						)
+						match matched.first() {
+							Ok((t, vars)) =>
+								make_call(
+									parts,
+									sess,
+									id,
+									"resources/read",
+									params,
+									msg,
+									rr,
+									|s0, c| {
+										(s1, o) = (t.read!)(s0, c, uri, vars)
+										(s1, o.map(contents_json))
+									},
+								)
+							Err(_) => error_reply(sess, id, McpError.resource_not_found(uri))
 						}
 					}
 				}
-			_ => error_reply(sess, id, McpError.invalid_params("Invalid resources/read request: uri must be a string"))
-		}
+			}
+		_ => error_reply(sess, id, McpError.invalid_params("Invalid resources/read request: uri must be a string"))
 	}
+}
 
 subscription : Server.Parts(state), Engine.Session, JsonValue, Str, JsonValue, JsonValue -> Engine.Step(state)
-subscription = |parts, sess, id, method, params, msg| match parts.subscribe {
-	Err(NotSupported) => not_found(sess, id)
-	Ok(handlers) =>
-		match params.get_or_null("uri") {
-			String(uri) =>
-				make_call(
-					parts,
-					sess,
-					id,
-					method,
-					params,
-					msg,
-					first_call,
-					|s0, c| {
-						(s1, r) = if (method == "resources/subscribe") (handlers.subscribe!)(s0, c, uri) else (handlers.unsubscribe!)(s0, c, uri)
-						match r {
-							Ok({}) => (s1, Outcome.done(Object([])))
-							Err(e) => (s1, Outcome.fail(e))
-						}
-					},
-				)
-			_ => error_reply(sess, id, McpError.invalid_params("Invalid ${method} request: uri must be a string"))
+subscription = |parts, sess, id, method, params, msg| {
+	handlers = match parts.subscribe {
+		Ok(hs) => hs
+		Err(NotSupported) => {
+			return not_found(sess, id)
 		}
+	}
+	match params.get_or_null("uri") {
+		String(uri) =>
+			make_call(
+				parts,
+				sess,
+				id,
+				method,
+				params,
+				msg,
+				first_call,
+				|s0, c| {
+					(s1, r) = if (method == "resources/subscribe") (handlers.subscribe!)(s0, c, uri) else (handlers.unsubscribe!)(s0, c, uri)
+					match r {
+						Ok({}) => (s1, Outcome.done(Object([])))
+						Err(e) => (s1, Outcome.fail(e))
+					}
+				},
+			)
+		_ => error_reply(sess, id, McpError.invalid_params("Invalid ${method} request: uri must be a string"))
+	}
 }
 
 prompts_list : Server.Parts(state), Engine.Session, Try(state, [NoState]), JsonValue, JsonValue -> Engine.Step(state)
-prompts_list = |parts, sess, maybe_st, id, params|
+prompts_list = |parts, sess, maybe_st, id, params| {
 	if parts.prompts.is_empty() {
-		not_found(sess, id)
-	} else {
-		visible = parts.prompts.keep_if(|p| allowed(maybe_st, p.enabled))
-		paged(parts, sess, id, "prompts/list", params, "prompts", visible.map(|p| p.prompt.to_json()))
+		return not_found(sess, id)
 	}
+	visible = parts.prompts.keep_if(|p| allowed(maybe_st, p.enabled))
+	paged(parts, sess, id, "prompts/list", params, "prompts", visible.map(|p| p.prompt.to_json()))
+}
 
 prompts_get : Server.Parts(state), Engine.Session, Try(state, [NoState]), JsonValue, JsonValue, JsonValue, Rerun -> Engine.Step(state)
-prompts_get = |parts, sess, maybe_st, id, params, msg, rr|
+prompts_get = |parts, sess, maybe_st, id, params, msg, rr| {
 	if parts.prompts.is_empty() {
-		not_found(sess, id)
-	} else {
-		issues = params_issues(present(msg, "params"), Bool.True)
-		name_ok = if (issues.is_empty()) params.get_or_null("name") else Null
-		match name_ok {
-			String(prompt_name) =>
-				match parts.prompts.find_first(|p| p.prompt.name() == prompt_name) {
-					Err(_) => error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} not found"))
-					Ok(entry) =>
-						if !(allowed(maybe_st, entry.enabled)) {
-							error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} disabled"))
-						} else {
-							checked = checked_prompt_args(parts.input_validation, entry.prompt, params)
-							prepared = match checked {
-								Ok(args) => (entry.prepare)(args)
-								Err(why) => Err(why)
-							}
-							match prepared {
-								Err(why) => error_reply(sess, id, McpError.invalid_params(why))
-								Ok(h!) =>
-									make_call(
-										parts,
-										sess,
-										id,
-										"prompts/get",
-										params,
-										msg,
-										rr,
-										|s0, c| {
-											(s1, o) = h!(s0, c)
-											(s1, o.map(Prompt.result_to_json))
-										},
-									)
-							}
-						}
-				}
-
-			## JS: the request schema's zod issues, as an internal error.
-			_ => error_reply(sess, id, McpError.internal(Wire.pretty(Array(issues))))
-		}
+		return not_found(sess, id)
 	}
+	issues = params_issues(present(msg, "params"), Bool.True)
+	name_ok = if (issues.is_empty()) params.get_or_null("name") else Null
+	match name_ok {
+		String(prompt_name) =>
+			match parts.prompts.find_first(|p| p.prompt.name() == prompt_name) {
+				Err(_) => error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} not found"))
+				Ok(entry) =>
+					if !(allowed(maybe_st, entry.enabled)) {
+						error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} disabled"))
+					} else {
+						checked = checked_prompt_args(parts.input_validation, entry.prompt, params)
+						prepared = match checked {
+							Ok(args) => (entry.prepare)(args)
+							Err(why) => Err(why)
+						}
+						match prepared {
+							Err(why) => error_reply(sess, id, McpError.invalid_params(why))
+							Ok(h!) =>
+								make_call(
+									parts,
+									sess,
+									id,
+									"prompts/get",
+									params,
+									msg,
+									rr,
+									|s0, c| {
+										(s1, o) = h!(s0, c)
+										(s1, o.map(Prompt.result_to_json))
+									},
+								)
+						}
+					}
+			}
+
+		## JS: the request schema's zod issues, as an internal error.
+		_ => error_reply(sess, id, McpError.internal(Wire.pretty(Array(issues))))
+	}
+}
 
 ## tools/call arguments checked against the tool's input schema (`Err`: the text after
 ## "Input validation error: "). Not generic, so it is compiled once.
@@ -1043,74 +1068,73 @@ context_arguments = |params| match params.get_or_null("context").get_or_null("ar
 }
 
 complete : Server.Parts(state), Engine.Session, Try(state, [NoState]), JsonValue, JsonValue, JsonValue -> Engine.Step(state)
-complete = |parts, sess, maybe_st, id, params, msg|
+complete = |parts, sess, maybe_st, id, params, msg| {
 	if !(completions_served(parts)) {
-		not_found(sess, id)
-	} else {
-		ref = params.get_or_null("ref")
-		arg_name = params.get_or_null("argument").get_or_null("name").as_str() ?? ""
-		value = params.get_or_null("argument").get_or_null("value").as_str() ?? ""
-		cc = { arguments: context_arguments(params) }
-		run_completer = |completer!|
-			make_call(
-				parts,
-				sess,
-				id,
-				"completion/complete",
-				params,
-				msg,
-				first_call,
-				|s0, c| {
-					(s1, values) = completer!(s0, c, value, cc)
-					(s1, Outcome.done(Array(values.map(|v| String(v)))))
-				},
-			)
-		match (ref.get_or_null("type"), ref.get_or_null("name"), ref.get_or_null("uri")) {
-			(String("ref/prompt"), String(prompt_name), _) =>
-				match parts.prompts.find_first(|p| p.prompt.name() == prompt_name) {
-					Err(_) => error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} not found"))
-					Ok(entry) =>
-						if !(allowed(maybe_st, entry.enabled)) {
-							error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} disabled"))
-						} else {
-							match entry.complete.find_first(|(a, _)| a == arg_name) {
-								Ok((_, completer!)) => run_completer(completer!)
-								Err(_) => method_reply(parts, sess, id, "completion/complete", Complete.empty)
-							}
-						}
-				}
-			(String("ref/resource"), _, String(uri)) =>
-				match parts.templates.find_first(|t| t.template.source() == uri) {
-					Ok(t) =>
-						match t.complete.find_first(|(a, _)| a == arg_name) {
+		return not_found(sess, id)
+	}
+	ref = params.get_or_null("ref")
+	arg_name = params.get_or_null("argument").get_or_null("name").as_str() ?? ""
+	value = params.get_or_null("argument").get_or_null("value").as_str() ?? ""
+	cc = { arguments: context_arguments(params) }
+	run_completer = |completer!|
+		make_call(
+			parts,
+			sess,
+			id,
+			"completion/complete",
+			params,
+			msg,
+			first_call,
+			|s0, c| {
+				(s1, values) = completer!(s0, c, value, cc)
+				(s1, Outcome.done(Array(values.map(|v| String(v)))))
+			},
+		)
+	match (ref.get_or_null("type"), ref.get_or_null("name"), ref.get_or_null("uri")) {
+		(String("ref/prompt"), String(prompt_name), _) =>
+			match parts.prompts.find_first(|p| p.prompt.name() == prompt_name) {
+				Err(_) => error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} not found"))
+				Ok(entry) =>
+					if !(allowed(maybe_st, entry.enabled)) {
+						error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} disabled"))
+					} else {
+						match entry.complete.find_first(|(a, _)| a == arg_name) {
 							Ok((_, completer!)) => run_completer(completer!)
 							Err(_) => method_reply(parts, sess, id, "completion/complete", Complete.empty)
 						}
-					Err(_) =>
-						if parts.resources.any(|r| r.resource.uri() == uri) {
-							method_reply(parts, sess, id, "completion/complete", Complete.empty)
-						} else {
-							error_reply(sess, id, McpError.invalid_params("Resource template ${uri} not found"))
-						}
-				}
-			_ => error_reply(sess, id, McpError.invalid_params("Invalid completion reference"))
-		}
+					}
+			}
+		(String("ref/resource"), _, String(uri)) =>
+			match parts.templates.find_first(|t| t.template.source() == uri) {
+				Ok(t) =>
+					match t.complete.find_first(|(a, _)| a == arg_name) {
+						Ok((_, completer!)) => run_completer(completer!)
+						Err(_) => method_reply(parts, sess, id, "completion/complete", Complete.empty)
+					}
+				Err(_) =>
+					if parts.resources.any(|r| r.resource.uri() == uri) {
+						method_reply(parts, sess, id, "completion/complete", Complete.empty)
+					} else {
+						error_reply(sess, id, McpError.invalid_params("Resource template ${uri} not found"))
+					}
+			}
+		_ => error_reply(sess, id, McpError.invalid_params("Invalid completion reference"))
 	}
+}
 
 legacy_notification : Server.Parts(state), Engine.Session, { method : Str, params : JsonValue }, JsonValue -> Engine.Step(state)
 legacy_notification = |parts, sess, n, msg| {
 	sess1 = if (n.method == "notifications/initialized") { ..sess, initialized: Bool.True } else sess
 	if n.method == "notifications/cancelled" {
-		cancel_parked(sess1, n.params)
-	} else {
-		match parts.notification_handlers.find_first(|(m, _)| m == n.method) {
-			Ok((_, h!)) => {
-				c = make_ctx(parts, sess1, Err(Notification), n.method, n.params, first_call)
-				params = n.params
-				{ session: sess1, out: [], calls: [{ request_id: Err(Notification), message: msg, ctx: c, run!: |s0, cx| (h!(s0, cx, params), Outcome.done(Null)) }], log: [] }
-			}
-			Err(_) => reply(sess1, [])
+		return cancel_parked(sess1, n.params)
+	}
+	match parts.notification_handlers.find_first(|(m, _)| m == n.method) {
+		Ok((_, h!)) => {
+			c = make_ctx(parts, sess1, Err(Notification), n.method, n.params, first_call)
+			params = n.params
+			{ session: sess1, out: [], calls: [{ request_id: Err(Notification), message: msg, ctx: c, run!: |s0, cx| (h!(s0, cx, params), Outcome.done(Null)) }], log: [] }
 		}
+		Err(_) => reply(sess1, [])
 	}
 }
 
@@ -1186,11 +1210,10 @@ rerun = |parts, sess, msg, id, rr| {
 		(Ok(rs), Ok(verify)) => verify(make_ctx(parts, sess, Ok(id), method, params, rr), rs)
 		_ => Bool.True
 	}
-	if verified {
-		dispatch(parts, sess, Err(NoState), id, method, params, msg, rr)
-	} else {
-		error_reply(sess, id, McpError.invalid_params("Invalid or expired requestState"))
+	if !verified {
+		return error_reply(sess, id, McpError.invalid_params("Invalid or expired requestState"))
 	}
+	dispatch(parts, sess, Err(NoState), id, method, params, msg, rr)
 }
 
 ## `NeedInput` on a 2025 connection: the input shim. Requests are sent in the form of the JS
@@ -1205,8 +1228,9 @@ need_input = |parts, sess, call, id, method, req, now_ms| {
 	to_send = plan.to_send
 	refused_answers = plan.refused_answers
 	if !(Legacy.input_methods.contains(method)) {
-		error_reply(sess, id, McpError.internal("Handler for ${method} asked for input, but only tools/call, prompts/get and resources/read may"))
-	} else if round_no > Legacy.max_rounds {
+		return error_reply(sess, id, McpError.internal("Handler for ${method} asked for input, but only tools/call, prompts/get and resources/read may"))
+	}
+	if round_no > Legacy.max_rounds {
 		reply(sess, [shim_failure_line(id, method, Legacy.rounds_exceeded(method))])
 	} else if requests.is_empty() and req.request_state().is_err() {
 		error_reply(sess, id, McpError.internal("Handler for ${method} returned an input-required result with neither inputRequests nor requestState"))
@@ -1283,6 +1307,9 @@ done_line = |parts, sess, msg, method, id, raw| {
 		Err(why) => Wire.error_line(id, McpError.invalid_params("Invalid ${method} result: ${why}"))
 	}
 	params = msg.get_or_null("params")
+	if method == "resources/read" or method == "prompts/get" {
+		return checked(raw)
+	}
 	match method {
 		"tools/call" => {
 			tool_name = params.get_or_null("name").as_str() ?? ""
