@@ -248,6 +248,54 @@ Modern :: [].{
 		_ => []
 	}
 
+	## The prefix of a `requestState` written by `carry`.
+	carry_prefix : Str
+	carry_prefix = "mcp-sdk-carry:"
+
+	## The `requestState` of an `input_required` result that a retry returns: the answers of the
+	## earlier rounds of this call, the app's own state, and whether the repeat diagnostic was
+	## logged, as `mcp-sdk-carry:{"answers":{<key>:<result>,...},"state"?:"...","noted"?:true}`.
+	## The spec makes `requestState` the server's place for context across retries (the client
+	## sends `inputResponses` only for the latest `inputRequests`), so the answers come back with
+	## the next retry and `Ctx.input` keeps them.
+	carry : List((Str, Input.Answer)), Try(Str, [None]), Bool -> Str
+	carry = |given, app_state, repeat_noted| {
+		kept = given.keep_oks(
+			|(k, a)| match a {
+				Answered(j) => Ok((k, j))
+				_ => Err(Skip)
+			},
+		)
+		state_field = match app_state {
+			Ok(s) => [("state", String(s))]
+			Err(None) => []
+		}
+		noted_field = if (repeat_noted) [("noted", Bool(Bool.True))] else []
+		body : JsonValue
+		body = Object([("answers", Object(kept))].concat(state_field).concat(noted_field))
+		"${carry_prefix}${body.to_str()}"
+	}
+
+	## A retry's `requestState`: `Plain` for the app's own state, `Carried` for one that `carry`
+	## wrote, `Err(BadCarry)` for one with the prefix that does not decode.
+	uncarry : Str -> Try([Plain(Str), Carried({ answers : List((Str, Input.Answer)), state : Try(Str, [None]), noted : Bool })], [BadCarry])
+	uncarry = |rs| {
+		if !(rs.starts_with(carry_prefix)) {
+			return Ok(Plain(rs))
+		}
+		body = JsonValue.parse(rs.drop_prefix(carry_prefix)).map_err(|_| BadCarry)?
+		fs = match body.get("answers") {
+			Ok(Object(xs)) => Ok(xs)
+			_ => Err(BadCarry)
+		}?
+		app_state = match body.get("state") {
+			Ok(String(s)) => Ok(Ok(s))
+			Err(NotFound) => Ok(Err(None))
+			Ok(_) => Err(BadCarry)
+		}?
+		Ok(Carried({ answers: fs.map(|(k, j)| (k, Answered(j))), state: app_state, noted: body.get("noted") == Ok(Bool(Bool.True)) }))
+	}
+
 	## A handler's `NeedInput` as the 2026-07-28 result `{resultType: "input_required",
 	## inputRequests?, requestState?}`. Each request must be covered by the request envelope's
 	## client capabilities (-32021 with `requiredCapabilities`, the missing ones).

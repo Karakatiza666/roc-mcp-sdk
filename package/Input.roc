@@ -57,11 +57,11 @@ Input :: [].{
 
 	## What `Outcome.need_input` carries.
 	##
-	## Each request of one call needs its own key, in every round: `Ctx.input` gives only the
-	## previous round's answers, and the handler runs again from the start, so a second roots
-	## request in the same call (a later round) must use another key than the first, or the
-	## handler would read the first answer again. A handler that needs answers of several rounds
-	## keeps them in `with_state`.
+	## The handler runs again from the top in each round, and `Ctx.input` gives the answers of
+	## every earlier round of the call (the latest one for a key asked again). So a handler asks
+	## for a key only while `Ctx.input(key)` reads `NotAsked`: asking again for a key that has an
+	## answer repeats the request in every round, until the round cap (2025) or for as long as
+	## the client retries (2026-07-28), and the engine logs it once per call (`Step.log`).
 	Required :: { requests : List((Str, Input.Request)), request_state : Try(Str, [None]), timeout_ms : Try(U64, [None]), progress_token : Bool }.{
 		one : Str, Input.Request -> Input.Required
 		one = |key, req| { requests: [(key, req)], request_state: Err(None), timeout_ms: Err(None), progress_token: Bool.False }

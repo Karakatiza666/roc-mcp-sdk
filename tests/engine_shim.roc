@@ -26,7 +26,7 @@ p! = |s, _c, _a| (s, Outcome.done({ description: Err(None), messages: [] }))
 
 server : Server({})
 server =
-	["roots", "two", "url", "forever", "stateonly", "slow", "sample", "d_roots", "d_two", "d_form", "d_sample", "d_url", "memo"]
+	["roots", "two", "url", "forever", "stateonly", "slow", "sample", "d_roots", "d_two", "d_form", "d_sample", "d_url", "memo", "acc", "again"]
 		.fold(Server.new({ name: "f", version: "2" }), |s, n| s.tool_json(Tool.new(n), any!))
 		.prompt(Prompt.new("askp"), p!)
 
@@ -78,6 +78,15 @@ script = |call| {
 					need(Input.Required.one("roots2", ListRoots).with_state("${c.request_state() ?? "none"};second")),
 					Session.text("${c.request_state() ?? "none"} | ${describe(c.input("roots"))} | ${describe(c.input("roots2"))}"),
 				)
+			# Asks "roots", then "roots2", then answers with both (the port's two-step roots).
+			"acc" =>
+				match (c.input("roots"), c.input("roots2")) {
+					(NotAsked, _) => need(Input.Required.one("roots", ListRoots))
+					(_, NotAsked) => need(Input.Required.one("roots2", ListRoots))
+					(a, b) => Session.text("${describe(a)} | ${describe(b)} | round ${c.round().to_str()}")
+				}
+			# Asks "roots" twice, then reads the latest answer.
+			"again" => if (c.round() < 2) need(Input.Required.one("roots", ListRoots)) else Session.text(describe(c.input("roots")))
 			"slow" => if (first) need(Input.Required.one("roots", ListRoots).with_timeout_ms(2000)) else Session.text(describe(c.input("roots")))
 			# The default form: the JS direct calls (no progress token).
 			"d_roots" => if (first) Outcome.need_input(Input.Required.one("roots", ListRoots)) else Session.text(describe(c.input("roots")))
@@ -337,10 +346,69 @@ expect {
 }
 
 # Per-call carry-over: the request state rides in the parked entry from round to round, and
-# Ctx.input holds only the last round's answers, so each round asks under its own key.
+# Ctx.input keeps the answers of every earlier round of the call.
 expect {
 	r = after_init(server, all_caps, [call("2", "memo"), answer("0", "{\"roots\":[]}"), answer("1", "{\"roots\":[{\"uri\":\"file:///x\"}]}")])
-	r.out == [roots_request("0"), roots_request("1"), text_result("2", "found=42;second | not asked | answered {\\\"roots\\\":[{\\\"uri\\\":\\\"file:///x\\\"}]}")]
+	r.out == [roots_request("0"), roots_request("1"), text_result("2", "found=42;second | answered {\\\"roots\\\":[]} | answered {\\\"roots\\\":[{\\\"uri\\\":\\\"file:///x\\\"}]}")]
+}
+
+# Answers accumulate: a handler that asks "roots", then "roots2", sees both in round 2 (before,
+# it saw only roots2, asked for roots again and looped to the round cap). Nothing is logged.
+expect {
+	r = after_init(server, all_caps, [call("2", "acc"), answer("0", "{\"roots\":[]}"), answer("1", "{\"roots\":[{\"uri\":\"file:///y\"}]}")])
+	r.out == [roots_request("0"), roots_request("1"), text_result("2", "answered {\\\"roots\\\":[]} | answered {\\\"roots\\\":[{\\\"uri\\\":\\\"file:///y\\\"}]} | round 2")]
+		and r.log == []
+		and r.session.waiting() == 0
+}
+
+# A key asked again: the latest answer wins, and the log names the key once.
+expect {
+	r = after_init(server, all_caps, [call("2", "again"), answer("0", "{\"roots\":[]}"), answer("1", "{\"roots\":[{\"uri\":\"file:///z\"}]}")])
+	r.out == [roots_request("0"), roots_request("1"), text_result("2", "answered {\\\"roots\\\":[{\\\"uri\\\":\\\"file:///z\\\"}]}")]
+		and r.log.len() == 1
+		and Session.first_has(r.log, "Handler for tools/call (request 2) asked again for input 'roots', which this call already has an answer for")
+}
+
+# A handler that asks for the same key every round: still ended after 8 rounds, with one
+# diagnostic for the whole call.
+expect {
+	answers = (0.U64..<8).iter().map(|i| answer(i.to_str(), "{\"roots\":[]}")).collect()
+	r = after_init(server, all_caps, [call("2", "forever")].concat(answers))
+	r.out.last() == Ok(error_result("2", "Multi-round-trip request 'tools/call' still required input after 8 rounds (inputRequired.maxRounds)"))
+		and r.log.len() == 1
+		and Session.first_has(r.log, "asked again for input 'roots'")
+}
+
+# A deadline in a later round keeps the earlier rounds' answers: only roots2 times out.
+expect {
+	r = after_init(server, all_caps, [call("2", "acc"), answer("0", "{\"roots\":[]}")])
+	late = Session.expire(server, r.session, {}, script, 601_000)
+	late.out.last() == Ok(text_result("2", "answered {\\\"roots\\\":[]} | timed out | round 2"))
+}
+
+# The accumulated answers and the diagnostic flag survive Session.to_json / from_json: the call
+# continues with the first round's answer, and a resumed looping call logs nothing more.
+expect {
+	r = after_init(server, all_caps, [call("2", "acc"), answer("0", "{\"roots\":[]}")])
+	match Engine.Session.from_json(r.session.to_json()) {
+		Ok(back) => {
+			cont = Session.drive(server, back, {}, [answer("1", "{\"roots\":[]}")], script, 2000)
+			back.to_json() == r.session.to_json() and cont.out == [text_result("2", "answered {\\\"roots\\\":[]} | answered {\\\"roots\\\":[]} | round 2")]
+		}
+		Err(_) => Bool.False
+	}
+}
+expect {
+	r = after_init(server, all_caps, [call("2", "forever"), answer("0", "{\"roots\":[]}"), answer("1", "{\"roots\":[]}")])
+	stored = r.session.to_json()
+	match Engine.Session.from_json(stored) {
+		Ok(back) => {
+			rest = (2.U64..<8).iter().map(|i| answer(i.to_str(), "{\"roots\":[]}")).collect()
+			cont = Session.drive(server, back, {}, rest, script, 2000)
+			r.log.len() == 1 and stored.to_str().contains("\"inputRepeatNoted\":true") and back.to_json() == stored and cont.log == [] and cont.out.len() == 6
+		}
+		Err(_) => Bool.False
+	}
 }
 
 # The state a handler returns with NeedInput is dropped (the next round starts from the state

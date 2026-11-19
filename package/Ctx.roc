@@ -41,6 +41,7 @@ Ctx :: {
 	auth : Try(Ctx.AuthInfo, [None]),
 	round : U64,
 	routing : [Direct, Subscriptions(List(JsonValue))],
+	repeat_noted : Bool,
 	send! : Str => {},
 }.{
 
@@ -87,6 +88,7 @@ Ctx :: {
 		auth: p.auth,
 		round: p.round,
 		routing: Direct,
+		repeat_noted: Bool.False,
 		send!: |_line| {},
 	}
 
@@ -139,7 +141,10 @@ Ctx :: {
 	progress_token : Ctx -> Try(JsonValue, [None])
 	progress_token = |c| c.meta.get("progressToken").map_err(|_| None)
 
-	## The answer to one input request of the previous round (`NotAsked` on the first call).
+	## The answer to one input request of this call: the answer from any earlier round (the
+	## latest one when the key was asked again), or `NotAsked` when the key was never asked.
+	## Answers accumulate over the rounds of one call, in both eras (DESIGN 2, "Answers
+	## accumulate"), so a handler asks for a key only while it reads `NotAsked`.
 	input : Ctx, Str -> Input.Answer
 	input = |c, key| match c.inputs.find_first(|(k, _)| k == key) {
 		Ok((_, a)) => a
@@ -248,6 +253,15 @@ Ctx :: {
 	## the change notifications are routed to.
 	with_subscriptions : Ctx, List(JsonValue) -> Ctx
 	with_subscriptions = |c, subs| { ..c, routing: Subscriptions(subs) }
+
+	## For the engine: true once the engine has logged that this call asked again for a key it
+	## already had an answer for (the diagnostic is logged once per call).
+	input_repeat_noted : Ctx -> Bool
+	input_repeat_noted = |c| c.repeat_noted
+
+	## For the engine: see `input_repeat_noted`.
+	with_input_repeat_noted : Ctx, Bool -> Ctx
+	with_input_repeat_noted = |c, b| { ..c, repeat_noted: b }
 
 	## For transports: install the writer. Handlers never call this.
 	with_sender : Ctx, (Str => {}) -> Ctx

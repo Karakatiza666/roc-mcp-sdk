@@ -181,7 +181,9 @@ Engine :: [].{
 	}
 
 	## A request waiting for the answers to its server-to-client requests (2025 input shim).
-	## `pending` are the requests not answered yet; `round` counts from 1.
+	## `pending` are the requests not answered yet; `round` counts from 1. `answers` holds every
+	## answer of the call so far, earlier rounds included (one per key, the latest), and
+	## `repeat_noted` whether the "asked again" diagnostic was logged for this call.
 	Parked : {
 		id : JsonValue,
 		message : JsonValue,
@@ -191,6 +193,7 @@ Engine :: [].{
 		answers : List((Str, Input.Answer)),
 		request_state : Try(Str, [None]),
 		deadline_ms : U64,
+		repeat_noted : Bool,
 	}
 
 	latest_version : Str
@@ -259,10 +262,21 @@ Engine :: [].{
 			NeedInput(req) =>
 				if sess.era == Modern {
 					# 2026-07-28: the client gets `input_required` and retries with the answers.
-					match Modern.input_required(method, req, call.ctx.client_capabilities()) {
+					# The answers of earlier rounds go out in `requestState` and come back with the
+					# retry (the client resends only the latest round's), see `Modern.carry`.
+					log = repeat_log(call.ctx, id, method, req)
+					carried = call.ctx.parts().inputs
+					req2 =
+						if carried.is_empty() or (req.requests().is_empty() and req.request_state().is_err()) {
+							req
+						} else {
+							req.with_state(Modern.carry(carried, req.request_state(), call.ctx.input_repeat_noted() or !(log.is_empty())))
+						}
+					step = match Modern.input_required(method, req2, call.ctx.client_capabilities()) {
 						Ok(j) => reply(sess, [result_line(parts, sess, id, method, j)])
 						Err(e) => error_reply(sess, id, e)
 					}
+					{ ..step, log }
 				} else {
 					need_input(parts, sess, call, id, method, req, now_ms)
 				}
@@ -286,8 +300,8 @@ Engine :: [].{
 				next = match parts.input_failures {
 					FailRequest => reply(acc.session, [shim_failure_line(p.id, p.method, Legacy.fulfil_failed(p.method, "Request timed out"))])
 					ToHandler => {
-						answers = p.answers.concat(p.pending.map(|leg| (leg.key, TimedOut)))
-						rerun(parts, acc.session, p.message, p.id, { inputs: answers, request_state: p.request_state, round: p.round })
+						answers = p.pending.fold(p.answers, |given, leg| put_answer(given, (leg.key, TimedOut)))
+						rerun(parts, acc.session, p.message, p.id, { inputs: answers, request_state: p.request_state, round: p.round, repeat_noted: p.repeat_noted })
 					}
 				}
 				join(acc, { ..next, out: cancels.concat(next.out) })
@@ -428,20 +442,29 @@ modern_request = |server, parts, sess, st, r, msg| {
 			} else {
 				inputs = Modern.input_responses(r.params)
 				retried = r.params.get("inputResponses").is_ok() or r.params.get("requestState").is_ok()
-				rr0 = { inputs, request_state: Err(None), round: if (retried) 1 else 0 }
+				rr0 = { inputs, request_state: Err(None), round: if (retried) 1 else 0, repeat_noted: Bool.False }
 				bad_state = McpError.invalid_params("Invalid or expired requestState").with_data(Object([("reason", String("invalid_request_state"))]))
 				checked =
 					if Modern.input_methods.contains(r.method) {
 						match r.params.get("requestState") {
 							Err(_) => Ok(rr0)
-							Ok(String(rs)) => {
-								rr1 = { ..rr0, request_state: Ok(rs) }
-								ok = match parts.verify_request_state {
-									Ok(verify) => verify(make_ctx(parts, sess, Ok(r.id), r.method, r.params, rr1), rs)
-									Err(None) => Bool.True
+							Ok(String(raw)) =>
+								match Modern.uncarry(raw) {
+									Err(BadCarry) => Err(bad_state)
+									Ok(found) => {
+										# A carried state holds the earlier rounds' answers (this
+										# retry's answers win) and the app's own state, if any.
+										(rr1, app_state) = match found {
+											Plain(rs) => ({ ..rr0, request_state: Ok(rs) }, Ok(rs))
+											Carried(c) => ({ ..rr0, inputs: merge_answers(c.answers, inputs), request_state: c.state, repeat_noted: c.noted }, c.state)
+										}
+										ok = match (app_state, parts.verify_request_state) {
+											(Ok(rs), Ok(verify)) => verify(make_ctx(parts, sess, Ok(r.id), r.method, r.params, rr1), rs)
+											_ => Bool.True
+										}
+										if (ok) Ok(rr1) else Err(bad_state)
+									}
 								}
-								if (ok) Ok(rr1) else Err(bad_state)
-							}
 							Ok(_) => Err(bad_state)
 						}
 					} else {
@@ -536,11 +559,50 @@ legacy_error = |e|
 		e
 	}
 
-## The answers and state a request is dispatched with: none on the first call.
-Rerun : { inputs : List((Str, Input.Answer)), request_state : Try(Str, [None]), round : U64 }
+## The answers and state a request is dispatched with: none on the first call. `inputs` are
+## all the answers of the call so far (they accumulate over the rounds); `repeat_noted` is set
+## once the "asked again" diagnostic was logged for the call.
+Rerun : { inputs : List((Str, Input.Answer)), request_state : Try(Str, [None]), round : U64, repeat_noted : Bool }
 
 first_call : Rerun
-first_call = { inputs: [], request_state: Err(None), round: 0 }
+first_call = { inputs: [], request_state: Err(None), round: 0, repeat_noted: Bool.False }
+
+## `given` with `answer` for its key: replaced in place when the key has one, else appended.
+put_answer : List((Str, Input.Answer)), (Str, Input.Answer) -> List((Str, Input.Answer))
+put_answer = |given, (key, answer)|
+	if given.any(|(k, _)| k == key) {
+		given.map(|(k, a)| if (k == key) (k, answer) else (k, a))
+	} else {
+		given.append((key, answer))
+	}
+
+## The answers of `earlier` rounds updated with `later` ones (a key's latest answer wins).
+merge_answers : List((Str, Input.Answer)), List((Str, Input.Answer)) -> List((Str, Input.Answer))
+merge_answers = |earlier, later| later.fold(earlier, put_answer)
+
+## The keys of `req` that this call already has an answer for.
+repeated_keys : Ctx, Input.Required -> List(Str)
+repeated_keys = |c, req|
+	req.requests().keep_oks(
+		|(key, _)| match c.input(key) {
+			NotAsked => Err(NotAsked)
+			_ => Ok(key)
+		},
+	)
+
+## The "asked again" diagnostic for `Step.log`: once per call, when a handler asks for a key
+## that already has an answer in this call. Each round runs the handler from the top, so a
+## handler that asks without checking `Ctx.input` first asks every round until the round cap.
+repeat_log : Ctx, JsonValue, Str, Input.Required -> List(Str)
+repeat_log = |c, id, method, req| {
+	keys = repeated_keys(c, req)
+	if keys.is_empty() or c.input_repeat_noted() {
+		[]
+	} else {
+		shown = Str.join_with(keys.map(|k| "'${k}'"), ", ")
+		["Handler for ${method} (request ${id.to_str()}) asked again for input ${shown}, which this call already has an answer for. Each round runs the handler from the top and Ctx.input keeps the answers of earlier rounds: ask only while Ctx.input reads NotAsked, or use a new key (a 2025 request ends after ${Legacy.max_rounds.to_str()} rounds)"]
+	}
+}
 
 make_ctx : Server.Parts(state), Engine.Session, Try(JsonValue, [Notification]), Str, JsonValue, Rerun -> Ctx
 make_ctx = |parts, sess, rid, method, params, rr| {
@@ -568,6 +630,7 @@ make_ctx = |parts, sess, rid, method, params, rr| {
 		round: rr.round,
 	})
 		.with_subscriptions(sess.subscriptions)
+		.with_input_repeat_noted(rr.repeat_noted)
 }
 
 legacy_ctx : Server.Parts(state), Engine.Session, Try(JsonValue, [Notification]), Str, JsonValue, Rerun -> Ctx
@@ -591,6 +654,7 @@ legacy_ctx = |parts, sess, rid, method, params, rr|
 		auth: sess.auth,
 		round: rr.round,
 	})
+		.with_input_repeat_noted(rr.repeat_noted)
 
 make_call : Server.Parts(state), Engine.Session, JsonValue, Str, JsonValue, JsonValue, Rerun, (state, Ctx => (state, Outcome(JsonValue))) -> Engine.Step(state)
 make_call = |parts, sess, id, method, params, msg, rr, run!| {
@@ -1176,7 +1240,7 @@ answer_received = |parts, sess, r, msg| {
 				Result(j) => Answered(j)
 				Error(e) => Failed(McpError.from_json(e) ?? McpError.internal(e.to_str()))
 			}
-			p1 = { ..p, pending: p.pending.drop_if(|leg| leg.out_id == out_id), answers: p.answers.append((key, answer)) }
+			p1 = { ..p, pending: p.pending.drop_if(|leg| leg.out_id == out_id), answers: put_answer(p.answers, (key, answer)) }
 			others = sess.parked.drop_if(|q| q.id == p.id)
 			match (parts.input_failures, answer) {
 				(FailRequest, Failed(err)) => {
@@ -1185,7 +1249,7 @@ answer_received = |parts, sess, r, msg| {
 				}
 				_ =>
 					if p1.pending.is_empty() {
-						rerun(parts, { ..sess, parked: others }, p1.message, p1.id, { inputs: p1.answers, request_state: p1.request_state, round: p1.round })
+						rerun(parts, { ..sess, parked: others }, p1.message, p1.id, { inputs: p1.answers, request_state: p1.request_state, round: p1.round, repeat_noted: p1.repeat_noted })
 					} else {
 						reply({ ..sess, parked: sess.parked.map(|q| if (q.id == p.id) p1 else q) }, [])
 					}
@@ -1200,7 +1264,7 @@ shim_failure_line = |id, method, text| match Legacy.failure(method, text) {
 	Error(e) => Wire.error_line(id, e)
 }
 
-## Dispatches a parked request again with the answers of its last round. The request state is
+## Dispatches a parked request again with the answers of all its rounds so far. The request state is
 ## checked by the server's verifier first.
 rerun : Server.Parts(state), Engine.Session, JsonValue, JsonValue, Rerun -> Engine.Step(state)
 rerun = |parts, sess, msg, id, rr| {
@@ -1230,38 +1294,45 @@ need_input = |parts, sess, call, id, method, req, now_ms| {
 	if !(Legacy.input_methods.contains(method)) {
 		return error_reply(sess, id, McpError.internal("Handler for ${method} asked for input, but only tools/call, prompts/get and resources/read may"))
 	}
-	if round_no > Legacy.max_rounds {
-		reply(sess, [shim_failure_line(id, method, Legacy.rounds_exceeded(method))])
-	} else if requests.is_empty() and req.request_state().is_err() {
-		error_reply(sess, id, McpError.internal("Handler for ${method} returned an input-required result with neither inputRequests nor requestState"))
-	} else {
-		match missing {
-			Ok(text) => reply(sess, [shim_failure_line(id, method, text)])
-			Err(_) =>
-				match (parts.input_failures, refused.first()) {
-					(FailRequest, Ok((_, why))) => reply(sess, [shim_failure_line(id, method, Legacy.fulfil_failed(method, why))])
-					_ =>
-						if to_send.is_empty() {
-							rerun(parts, sess, call.message, id, { inputs: refused_answers, request_state: req.request_state(), round: round_no })
-						} else {
-							first_n = sess.next_out_id
-							sent = round_requests(to_send, first_n, req.progress_token())
-							timeout = req.timeout_ms() ?? Legacy.default_round_timeout_ms
-							parked = {
-								id,
-								message: call.message,
-								method,
-								round: round_no,
-								pending: sent.pending,
-								answers: refused_answers,
-								request_state: req.request_state(),
-								deadline_ms: now_ms + timeout,
+	# Answers accumulate: the earlier rounds' answers stay, and this round's replace them per key.
+	earlier = call.ctx.parts().inputs
+	log = repeat_log(call.ctx, id, method, req)
+	noted = call.ctx.input_repeat_noted() or !(log.is_empty())
+	step =
+		if round_no > Legacy.max_rounds {
+			reply(sess, [shim_failure_line(id, method, Legacy.rounds_exceeded(method))])
+		} else if requests.is_empty() and req.request_state().is_err() {
+			error_reply(sess, id, McpError.internal("Handler for ${method} returned an input-required result with neither inputRequests nor requestState"))
+		} else {
+			match missing {
+				Ok(text) => reply(sess, [shim_failure_line(id, method, text)])
+				Err(_) =>
+					match (parts.input_failures, refused.first()) {
+						(FailRequest, Ok((_, why))) => reply(sess, [shim_failure_line(id, method, Legacy.fulfil_failed(method, why))])
+						_ =>
+							if to_send.is_empty() {
+								rerun(parts, sess, call.message, id, { inputs: merge_answers(earlier, refused_answers), request_state: req.request_state(), round: round_no, repeat_noted: noted })
+							} else {
+								first_n = sess.next_out_id
+								sent = round_requests(to_send, first_n, req.progress_token())
+								timeout = req.timeout_ms() ?? Legacy.default_round_timeout_ms
+								parked = {
+									id,
+									message: call.message,
+									method,
+									round: round_no,
+									pending: sent.pending,
+									answers: merge_answers(earlier, refused_answers),
+									request_state: req.request_state(),
+									deadline_ms: now_ms + timeout,
+									repeat_noted: noted,
+								}
+								reply({ ..sess, next_out_id: first_n + sent.pending.len(), parked: sess.parked.append(parked) }, sent.lines)
 							}
-							reply({ ..sess, next_out_id: first_n + sent.pending.len(), parked: sess.parked.append(parked) }, sent.lines)
-						}
-				}
+					}
+			}
 		}
-	}
+	{ ..step, log: log.concat(step.log) }
 }
 
 ## How a round's requests go out (not generic, compiled once): in the shim form, the first one
@@ -1356,16 +1427,20 @@ parked_to_json = |p| {
 		Ok(s) => String(s)
 		Err(None) => Null
 	}
-	Object([
-		("id", p.id),
-		("message", p.message),
-		("method", String(p.method)),
-		("round", JsonValue.from_u64(p.round)),
-		("pending", Array(p.pending.map(|leg| Object([("key", String(leg.key)), ("outId", JsonValue.from_u64(leg.out_id))])))),
-		("answers", Array(p.answers.map(answer_to_json))),
-		("requestState", rs),
-		("deadlineMs", JsonValue.from_u64(p.deadline_ms)),
-	])
+	# `inputRepeatNoted` is written only when set, so other sessions keep the 0.1 form.
+	noted = if (p.repeat_noted) [("inputRepeatNoted", Bool(Bool.True))] else []
+	Object(
+		[
+			("id", p.id),
+			("message", p.message),
+			("method", String(p.method)),
+			("round", JsonValue.from_u64(p.round)),
+			("pending", Array(p.pending.map(|leg| Object([("key", String(leg.key)), ("outId", JsonValue.from_u64(leg.out_id))])))),
+			("answers", Array(p.answers.map(answer_to_json))),
+			("requestState", rs),
+			("deadlineMs", JsonValue.from_u64(p.deadline_ms)),
+		].concat(noted),
+	)
 }
 
 answer_to_json : (Str, Input.Answer) -> JsonValue
@@ -1429,6 +1504,7 @@ parked_from_json = |j| {
 		answers,
 		request_state: rs,
 		deadline_ms: j.get("deadlineMs").map_err(bad)?.to_u64().map_err(bad)?,
+		repeat_noted: j.get("inputRepeatNoted") == Ok(Bool(Bool.True)),
 	})
 }
 
