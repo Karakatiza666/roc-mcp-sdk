@@ -111,14 +111,18 @@ Wire :: [].{
 		line.to_str()
 	}
 
+	## JSON as JavaScript's `JSON.stringify(value, null, 2)` writes it (zod's issue dumps).
+	pretty : JsonValue -> Str
+	pretty = |v| pretty_at(v, "")
+
 	## `notifications/cancelled` for a request the server sent.
-	cancelled_line : Str, Try(Str, [None]) -> Str
+	cancelled_line : U64, Try(Str, [None]) -> Str
 	cancelled_line = |out_id, reason| {
 		r = match reason {
 			Ok(s) => [("reason", String(s))]
 			Err(None) => []
 		}
-		notification_line("notifications/cancelled", Ok(Object([("requestId", String(out_id))].concat(r))))
+		notification_line("notifications/cancelled", Ok(Object([("requestId", JsonValue.from_u64(out_id))].concat(r))))
 	}
 
 	## The fields of an object, or `[]`.
@@ -140,4 +144,25 @@ Wire :: [].{
 	## `{...a, ...b}`: the keys of `b` override those of `a` in place; new keys go last.
 	spread : List((Str, JsonValue)), List((Str, JsonValue)) -> List((Str, JsonValue))
 	spread = |a, b| b.fold(a, |acc, (k, v)| put(acc, k, v))
+}
+
+pretty_at : JsonValue, Str -> Str
+pretty_at = |v, indent| {
+	inner = Str.concat(indent, "  ")
+	match v {
+		Array([]) => "[]"
+		Object([]) => "{}"
+		Array(xs) => "[\n${Str.join_with(xs.map(|x| Str.concat(inner, pretty_at(x, inner))), ",\n")}\n${indent}]"
+		Object(fs) => {
+			entries = fs.map(
+				|(k, x)| {
+					key : JsonValue
+					key = String(k)
+					"${inner}${key.to_str()}: ${pretty_at(x, inner)}"
+				},
+			)
+			"{\n${Str.join_with(entries, ",\n")}\n${indent}}"
+		}
+		other => other.to_str()
+	}
 }

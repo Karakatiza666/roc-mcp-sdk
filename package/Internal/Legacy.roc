@@ -69,15 +69,54 @@ Legacy :: [].{
 		}
 	}
 
-	## The params of a server-to-client request, with `_meta.progressToken` (a counter, as JS sends).
-	request_params : Input.Request, U64, Str -> JsonValue
+	## The params of a server-to-client request. With a token (the JS `inputRequired` shim),
+	## `_meta.progressToken` is added; without one they are what the JS direct calls send
+	## (`listRoots({})` sends `{}`).
+	request_params : Input.Request, Try(U64, [None]), Str -> JsonValue
 	request_params = |req, token, elicitation_id| {
 		base = Wire.fields(req.legacy_params(elicitation_id) ?? Object([]))
-		meta = match base.find_first(|(k, _)| k == "_meta") {
-			Ok((_, m)) => Wire.put(Wire.fields(m), "progressToken", JsonValue.from_u64(token))
-			Err(_) => [("progressToken", JsonValue.from_u64(token))]
+		match token {
+			Err(None) => Object(base)
+			Ok(n) => {
+				meta = match base.find_first(|(k, _)| k == "_meta") {
+					Ok((_, m)) => Wire.put(Wire.fields(m), "progressToken", JsonValue.from_u64(n))
+					Err(_) => [("progressToken", JsonValue.from_u64(n))]
+				}
+				Object(Wire.put(base, "_meta", Object(meta)))
+			}
 		}
-		Object(Wire.put(base, "_meta", Object(meta)))
+	}
+
+	## The error a JS direct call (`elicitInput`, `createMessage`) raises before sending when the
+	## client lacks the capability, or `Err(None)` when the call is sent (roots/list and sampling
+	## without tools are sent unchecked).
+	direct_refusal : JsonValue, Input.Request -> Try(Str, [None])
+	direct_refusal = |caps, req| {
+		declared = |path| {
+			found = path.fold(
+				Ok(caps),
+				|acc, k| match acc {
+					Ok(v) => v.get(k)
+					Err(e) => Err(e)
+				},
+			)
+			found.is_ok()
+		}
+		elicitation_form = match caps.get("elicitation") {
+			Ok(Object([])) => Bool.True
+			_ => declared(["elicitation", "form"])
+		}
+		match req {
+			ElicitForm(_) => if (elicitation_form) Err(None) else Ok("Client does not support form elicitation.")
+			ElicitUrl(_) => if (declared(["elicitation", "url"])) Err(None) else Ok("Client does not support url elicitation.")
+			CreateMessage(p) =>
+				if (p.get("tools").is_ok() or p.get("toolChoice").is_ok()) and !(declared(["sampling", "tools"])) {
+					Ok("Client does not support sampling tools capability.")
+				} else {
+					Err(None)
+				}
+			ListRoots => Err(None)
+		}
 	}
 
 	## The tools/call result as the 2025 wire carries it:

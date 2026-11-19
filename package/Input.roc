@@ -56,15 +56,21 @@ Input :: [].{
 	}
 
 	## What `Outcome.need_input` carries.
-	Required :: { requests : List((Str, Input.Request)), request_state : Try(Str, [None]), timeout_ms : Try(U64, [None]) }.{
+	##
+	## Each request of one call needs its own key, in every round: `Ctx.input` gives only the
+	## previous round's answers, and the handler runs again from the start, so a second roots
+	## request in the same call (a later round) must use another key than the first, or the
+	## handler would read the first answer again. A handler that needs answers of several rounds
+	## keeps them in `with_state`.
+	Required :: { requests : List((Str, Input.Request)), request_state : Try(Str, [None]), timeout_ms : Try(U64, [None]), progress_token : Bool }.{
 		one : Str, Input.Request -> Input.Required
-		one = |key, req| { requests: [(key, req)], request_state: Err(None), timeout_ms: Err(None) }
+		one = |key, req| { requests: [(key, req)], request_state: Err(None), timeout_ms: Err(None), progress_token: Bool.False }
 
 		## No request, only a state to keep: the handler runs again at once with
 		## `Ctx.request_state` set (the 2025 shim), or the client gets `input_required` with only
 		## `requestState` (2026-07-28).
 		keep_state : Str -> Input.Required
-		keep_state = |st| { requests: [], request_state: Ok(st), timeout_ms: Err(None) }
+		keep_state = |st| { requests: [], request_state: Ok(st), timeout_ms: Err(None), progress_token: Bool.False }
 
 		also : Input.Required, Str, Input.Request -> Input.Required
 		also = |r, key, req| { ..r, requests: r.requests.append((key, req)) }
@@ -75,6 +81,26 @@ Input :: [].{
 		## Legacy shim only: give up after this long. Enforced when the transport can wait with a timeout.
 		with_timeout_ms : Input.Required, U64 -> Input.Required
 		with_timeout_ms = |r, ms| { ..r, timeout_ms: Ok(ms) }
+
+		## 2025 connections only: the wire form of the server-to-client requests.
+		##
+		## `Bool.False` (the default) is the form of the JS SDK's direct calls, which is what a
+		## server written against the 2025 API sends (`server.listRoots({})`, `elicitInput(...)`,
+		## `createMessage(...)`): `{"method":"roots/list","params":{},"jsonrpc":"2.0","id":0}`.
+		## The capability checks are those calls' too: roots/list and sampling without tools are
+		## sent even when the client did not declare the capability; an elicitation or a sampling
+		## request with tools that the client cannot take is not sent, and its key reads
+		## `Failed` (-32603 "Client does not support form elicitation.", "... url elicitation.",
+		## "Client does not support sampling tools capability.").
+		##
+		## `Bool.True` is the form of the JS `inputRequired` shim: every request carries
+		## `params._meta.progressToken` (the request's id), and a request the client cannot take
+		## ends the call with "Cannot request input '<key>' (<method>): ...".
+		with_progress_token : Input.Required, Bool -> Input.Required
+		with_progress_token = |r, b| { ..r, progress_token: b }
+
+		progress_token : Input.Required -> Bool
+		progress_token = |r| r.progress_token
 
 		requests : Input.Required -> List((Str, Input.Request))
 		requests = |r| r.requests
@@ -91,12 +117,42 @@ Input :: [].{
 
 	Root : { uri : Str, name : Try(Str, [None]) }
 
-	## Decodes a roots/list result `{roots: [{uri, name?}, ...]}`.
+	## Decodes a roots/list result `{roots: [{uri, name?}, ...]}`. As in the JS SDK, every root
+	## URI must start with `file://`; a root that does not makes the whole answer
+	## `BadAnswer("roots.<i>.uri: Invalid string: must start with \"file://\"")`.
 	roots : JsonValue -> Try(List(Input.Root), [BadAnswer(Str)])
 	roots = |answer| match answer.get("roots") {
-		Ok(Array(items)) => items.map_try(decode_root)
+		Ok(Array(items)) => items.map_with_index(|item, i| (item, i)).map_try(decode_root)
 		Ok(_) => Err(BadAnswer("roots is not an array"))
 		Err(NotFound) => Err(BadAnswer("missing roots"))
+	}
+
+	## The filesystem path of a `file://` URI, as Node's `fileURLToPath` gives it on POSIX: the
+	## host must be empty or `localhost`, the query and fragment are dropped, `.` and `..`
+	## segments are resolved, and percent escapes are decoded (UTF-8). `NotAFileUri` for any
+	## other scheme, another host, an encoded `/` (`%2F`), a bad escape or bytes that are not
+	## UTF-8. Unlike a WHATWG URL parser, it does not turn `\` into `/`, and it needs the `//`.
+	file_uri_to_path : Str -> Try(Str, [NotAFileUri])
+	file_uri_to_path = |uri| {
+		bytes = uri.to_utf8()
+		if ascii_lower(Str.from_utf8_lossy(bytes.take_first(7))) != "file://" {
+			Err(NotAFileUri)
+		} else {
+			after_scheme = Str.from_utf8_lossy(bytes.drop_first(7))
+			no_fragment = (after_scheme.split_first("#").map_ok(|x| x.before)) ?? after_scheme
+			no_query = (no_fragment.split_first("?").map_ok(|x| x.before)) ?? no_fragment
+			(host, path) = match no_query.split_first("/") {
+				Ok({ before, after }) => (before, "/${after}")
+				Err(_) => (no_query, "/")
+			}
+			if host != "" and ascii_lower(host) != "localhost" {
+				Err(NotAFileUri)
+			} else if path.contains("%2F") or path.contains("%2f") {
+				Err(NotAFileUri)
+			} else {
+				percent_decode(resolve_dots(path))
+			}
+		}
 	}
 
 	Elicitation : [Accept(JsonValue), Decline, Cancel]
@@ -119,8 +175,9 @@ Input :: [].{
 	}
 }
 
-decode_root : JsonValue -> Try(Input.Root, [BadAnswer(Str)])
-decode_root = |item| match item.get("uri") {
+decode_root : (JsonValue, U64) -> Try(Input.Root, [BadAnswer(Str)])
+decode_root = |(item, i)| match item.get("uri") {
+	Ok(String(u)) if !(u.starts_with("file://")) => Err(BadAnswer("roots.${i.to_str()}.uri: Invalid string: must start with \"file://\""))
 	Ok(String(u)) =>
 		match item.get("name") {
 			Ok(String(n)) => Ok({ uri: u, name: Ok(n) })
@@ -129,4 +186,80 @@ decode_root = |item| match item.get("uri") {
 		}
 	Ok(_) => Err(BadAnswer("root uri is not a string"))
 	Err(NotFound) => Err(BadAnswer("root without uri"))
+}
+
+ascii_lower : Str -> Str
+ascii_lower = |s| Str.from_utf8_lossy(s.to_utf8().map(|c| if (c >= 'A' and c <= 'Z') c + 32 else c))
+
+is_dot : Str -> Bool
+is_dot = |seg| seg == "." or ascii_lower(seg) == "%2e"
+
+is_dot_dot : Str -> Bool
+is_dot_dot = |seg| {
+	l = ascii_lower(seg)
+	l == ".." or l == ".%2e" or l == "%2e." or l == "%2e%2e"
+}
+
+## Removes `.` and `..` segments of an absolute path (`/a/./b/../c` is `/a/c`), as URL parsing
+## does. A last segment `.` or `..` leaves the path ending in `/`.
+resolve_dots : Str -> Str
+resolve_dots = |path| {
+	segments = path.split_on("/").drop_first(1)
+	last = segments.last() ?? ""
+	kept = segments.fold(
+		[],
+		|acc, seg|
+			if is_dot(seg) {
+				acc
+			} else if is_dot_dot(seg) {
+				acc.drop_last(1)
+			} else {
+				acc.append(seg)
+			},
+	)
+	joined = "/${Str.join_with(kept, "/")}"
+	if ((is_dot(last) or is_dot_dot(last)) and !(kept.is_empty())) "${joined}/" else joined
+}
+
+hex_value : U8 -> Try(U8, [NotHex])
+hex_value = |c|
+	if c >= '0' and c <= '9' {
+		Ok(c - '0')
+	} else if c >= 'a' and c <= 'f' {
+		Ok(c - 'a' + 10)
+	} else if c >= 'A' and c <= 'F' {
+		Ok(c - 'A' + 10)
+	} else {
+		Err(NotHex)
+	}
+
+## `decodeURIComponent`: every `%` must start a two-digit escape, and the result must be UTF-8.
+percent_decode : Str -> Try(Str, [NotAFileUri])
+percent_decode = |s| {
+	bytes = s.to_utf8()
+	var $out = []
+	var $i = 0
+	var $bad = Bool.False
+	while $i < bytes.len() and !$bad {
+		b = bytes.get($i) ?? 0
+		if b == '%' {
+			match (hex_value(bytes.get($i + 1) ?? 0), hex_value(bytes.get($i + 2) ?? 0)) {
+				(Ok(h), Ok(l)) => {
+					$out = $out.append(h * 16 + l)
+					$i = $i + 3
+				}
+				_ => {
+					$bad = Bool.True
+				}
+			}
+		} else {
+			$out = $out.append(b)
+			$i = $i + 1
+		}
+	}
+	if $bad {
+		Err(NotAFileUri)
+	} else {
+		Str.from_utf8($out).map_err(|_| NotAFileUri)
+	}
 }

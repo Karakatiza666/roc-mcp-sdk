@@ -8,6 +8,7 @@ Tool :: {
 	title : Try(Str, [None]),
 	description : Try(Str, [None]),
 	input_schema : JsonValue,
+	input_schema_given : Bool,
 	output_schema : Try(JsonValue, [None]),
 	annotations : List((Str, JsonValue)),
 	icons : List(Content.Icon),
@@ -19,6 +20,7 @@ Tool :: {
 		title: Err(None),
 		description: Err(None),
 		input_schema: Object([("type", String("object")), ("properties", Object([]))]),
+		input_schema_given: Bool.False,
 		output_schema: Err(None),
 		annotations: [],
 		icons: [],
@@ -41,7 +43,7 @@ Tool :: {
 	## `{"type":"object","properties":{}}`, as JS does.
 	with_input_schema : Tool, JsonValue -> Tool
 	with_input_schema = |t, s| match s.get("type") {
-		Ok(String("object")) => { ..t, input_schema: if (s.get("$schema").is_ok()) s else Schema.with_dialect(s) }
+		Ok(String("object")) => { ..t, input_schema: if (s.get("$schema").is_ok()) s else Schema.with_dialect(s), input_schema_given: Bool.True }
 		_ => crash "Tool ${t.name}: the input schema's root must be `type: object`"
 	}
 
@@ -103,6 +105,11 @@ Tool :: {
 
 	input_schema : Tool -> JsonValue
 	input_schema = |t| t.input_schema
+
+	## True once `with_input_schema` was called. Only such a tool's arguments are validated
+	## (JS validates only a tool registered with an `inputSchema`).
+	has_input_schema : Tool -> Bool
+	has_input_schema = |t| t.input_schema_given
 
 	output_schema : Tool -> Try(JsonValue, [None])
 	output_schema = |t| t.output_schema
