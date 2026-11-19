@@ -38,6 +38,7 @@ Server(state) :: {
 	versions : { legacy : List(Str), modern : List(Str) },
 	input_failures : [ToHandler, FailRequest],
 	input_validation : Bool,
+	round_state : [Discard, Keep],
 }.{
 
 	## `completion/complete` callback: the partial value and the other arguments, to candidates.
@@ -101,6 +102,7 @@ Server(state) :: {
 		versions : { legacy : List(Str), modern : List(Str) },
 		input_failures : [ToHandler, FailRequest],
 		input_validation : Bool,
+		round_state : [Discard, Keep],
 	}
 
 	new : { name : Str, version : Str } -> Server(state)
@@ -124,6 +126,7 @@ Server(state) :: {
 		versions: { legacy: ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"], modern: ["2026-07-28"] },
 		input_failures: ToHandler,
 		input_validation: Bool.True,
+		round_state: Discard,
 	}
 
 	## serverInfo.title / description / websiteUrl. serverInfo keeps the order of these calls.
@@ -182,6 +185,15 @@ Server(state) :: {
 	## `isError` result for tools/call, else -32603) and the other requests of the round are cancelled.
 	with_input_failures : Server(state), [ToHandler, FailRequest] -> Server(state)
 	with_input_failures = |s, mode| { ..s, input_failures: mode }
+
+	## What happens to the state a handler returns together with `NeedInput` (both eras).
+	## `Discard` (the default): it is dropped, and the next round (or the next message) starts
+	## from the state before that run, so a call changes the app state once, in its final round,
+	## as a JS handler that awaits its server-to-client requests does. `Keep`: it is kept (the
+	## 0.1 rule; then a change made before asking is made again in every round). To carry
+	## results from one round to the next, use `Input.Required.with_state` / `Ctx.request_state`.
+	with_input_round_state : Server(state), [Discard, Keep] -> Server(state)
+	with_input_round_state = |s, mode| { ..s, round_state: mode }
 
 	## A tool whose arguments decode into the app's record type `args` (Encoding.Json).
 	##
@@ -406,6 +418,7 @@ Server(state) :: {
 		versions: s.versions,
 		input_failures: s.input_failures,
 		input_validation: s.input_validation,
+		round_state: s.round_state,
 	}
 }
 

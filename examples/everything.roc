@@ -187,7 +187,8 @@ touch! = |st, ctx, {}| {
 mark_final! : State, Ctx, Str, ToolResult => (State, ToolResult)
 mark_final! = |st, _ctx, name, result| if (name == "roots") (st, result.map_last_text(|t| "${t} [final]")) else (st, result)
 
-## Middleware: counts every tools/call (each re-entry of the input shim counts too).
+## Middleware: counts every tools/call. A round that asks for input is not counted: the
+## state a handler returns with `NeedInput` is dropped (`Server.with_input_round_state`).
 count_calls! : State, Ctx, Str, (State => (State, Outcome(ToolResult))) => (State, Outcome(ToolResult))
 count_calls! = |st, _ctx, _name, next!| next!({ ..st, tool_calls: st.tool_calls + 1 })
 

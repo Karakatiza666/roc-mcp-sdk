@@ -7,4 +7,4 @@
 {"result":{"content":[{"type":"text","text":"cached roots: file:///a, file:///b [final]"}]},"jsonrpc":"2.0","id":4}
 {"method":"roots/list","params":{"_meta":{"progressToken":1}},"jsonrpc":"2.0","id":1}
 {"result":{"content":[{"type":"text","text":"roots: file:///c [final]"}]},"jsonrpc":"2.0","id":5}
-{"result":{"count":0,"toolCalls":5,"pokes":0},"jsonrpc":"2.0","id":6}
+{"result":{"count":0,"toolCalls":3,"pokes":0},"jsonrpc":"2.0","id":6}
