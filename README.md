@@ -55,13 +55,30 @@ Build it with `roc build examples/hello.roc` and point an MCP client at the bina
 Concepts:
 - **State is threaded.** Every handler is `state, Ctx, input => (state, output)`. `Stdio.serve!`
   returns the final state.
-- **Typed arguments.** `Server.tool` decodes the arguments into your record type (a decode failure
-  is an `isError` result, as in JS). `Server.tool_json` gives the raw `JsonValue`. Schemas are
-  written with the `Schema` builders.
+- **Typed arguments.** Schemas are written with the `Schema` builders. Before a handler runs, the
+  arguments are checked against the tool's input schema with zod's messages (`SchemaCheck`), so a
+  bad call gets the same `isError` text as from a JS server ("Input validation error: Invalid
+  arguments for tool echo: text: Invalid input: expected string, received undefined"). Then
+  `Server.tool` decodes them into your record type; `Server.tool_json` gives the checked
+  `JsonValue`. Prompt arguments are checked against the `with_argument` list.
+  `Server.with_input_validation(Bool.False)` or `tool_input_validation(name, Bool.False)` turns
+  the check off (for a tool whose JS original used `z.preprocess`, which no JSON Schema shows).
 - **Server-to-client requests** use the `input_required` model: a handler returns
   `Outcome.need_input(Input.Required.one("roots", ListRoots))`, the SDK obtains the answer (on a
   2025 connection it sends a real `roots/list` request) and calls the handler again, which reads
-  it with `Ctx.input(ctx, "roots")`.
+  it with `Ctx.input(ctx, "roots")`. The request has the form of the JS direct call
+  (`server.listRoots({})`: `{"method":"roots/list","params":{},"jsonrpc":"2.0","id":0}`, integer
+  ids from 0); `.with_progress_token(Bool.True)` gives the form of the JS `inputRequired` shim
+  (`params._meta.progressToken`). Each request of one call needs its own key, also in later
+  rounds: `Ctx.input` gives only the previous round's answers and the handler runs again from the
+  start, so a second roots request in the same call needs another key (and anything the handler
+  must keep across rounds goes in `with_state`). `Input.roots` rejects a root whose URI is not
+  `file://` (as JS does), and `Input.file_uri_to_path` converts one to a path like Node's
+  `fileURLToPath`.
+- **Middleware.** `Server.around_tools` wraps every handler run, so a call that asks for input
+  passes through it once per round (`NeedInput` outcomes, then the final `Done`).
+  `Server.map_tool_results` changes only the final result, like a JS wrapper around a tool
+  callback.
 - **Notifications** from a handler: `Ctx.log!`, `Ctx.progress!`, `Ctx.list_changed!`,
   `Ctx.resource_updated!`, `Ctx.notify!`.
 
@@ -111,9 +128,10 @@ The full table is in [DESIGN.md section 7](DESIGN.md#7-js-sdk-200-feature-parity
   `_meta`, `input_required` results with `inputResponses`/`requestState` retries (the same
   `Outcome.need_input` handler code serves both eras), `subscriptions/listen` with change
   notifications routed to the subscriptions, and `-32601` for the removed methods.
-- **Supported differently:** JSON Schema is written by hand (Roc has no reflection) and arguments
-  are validated by decoding, not by a schema validator; tools are enabled by a predicate on the
-  state rather than by mutation; logging works only inside a handler.
+- **Supported differently:** JSON Schema is written by hand (Roc has no reflection), and arguments
+  are checked by `SchemaCheck`, which gives zod's messages for the subset of JSON Schema that
+  `Schema` writes and zod emits (no `pattern`, `format` or `$ref`); tools are enabled by a
+  predicate on the state rather than by mutation; logging works only inside a handler.
 - **Not applicable:** tasks (JS has schemas only), batching, debounced notifications, and (2026-07-28)
   per-resource cache hints.
 - **Stub:** Streamable HTTP (API final, implementation in a later release).

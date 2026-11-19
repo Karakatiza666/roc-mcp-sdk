@@ -116,7 +116,9 @@ slow! = |st, ctx, args| {
 	(st, Outcome.done(ToolResult.text("done ${args.steps.to_str()} steps")))
 }
 
-## Server-to-client roots/list (the input shim), cached in the state.
+## Server-to-client roots/list (the input shim), cached in the state. `with_progress_token`
+## sends it in the form of the JS `inputRequired` shim, which the JS twin uses; without it the
+## request has the form of a direct `server.listRoots({})`.
 roots! : State, Ctx, {} => (State, Outcome(ToolResult))
 roots! = |st, ctx, {}|
 	match st.roots {
@@ -126,7 +128,7 @@ roots! = |st, ctx, {}|
 				(st, Outcome.done(ToolResult.text("no roots capability")))
 			} else {
 				match ctx.input("roots") {
-					NotAsked => (st, Outcome.need_input(Input.Required.one("roots", ListRoots)))
+					NotAsked => (st, Outcome.need_input(Input.Required.one("roots", ListRoots).with_progress_token(Bool.True)))
 					Answered(answer) =>
 						match Input.roots(answer) {
 							Ok(list) => {
@@ -167,7 +169,7 @@ confirm! = |st, ctx, {}| {
 		}
 	match text {
 		Ok(t) => (st, Outcome.done(ToolResult.text(t)))
-		Err(Ask) => (st, Outcome.need_input(Input.Required.one("confirm", ask)))
+		Err(Ask) => (st, Outcome.need_input(Input.Required.one("confirm", ask).with_progress_token(Bool.True)))
 	}
 }
 
@@ -179,6 +181,11 @@ touch! = |st, ctx, {}| {
 	}
 	(st, Outcome.done(ToolResult.text("touched ${st.subscribed.len().to_str()}")))
 }
+
+## Marks the final result of the roots tool (`map_tool_results` runs once per call, on `Done`,
+## not on the rounds that ask for input).
+mark_final! : State, Ctx, Str, ToolResult => (State, ToolResult)
+mark_final! = |st, _ctx, name, result| if (name == "roots") (st, result.map_last_text(|t| "${t} [final]")) else (st, result)
 
 ## Middleware: counts every tools/call (each re-entry of the input shim counts too).
 count_calls! : State, Ctx, Str, (State => (State, Outcome(ToolResult))) => (State, Outcome(ToolResult))
@@ -311,6 +318,7 @@ server =
 		.tool(Tool.new("confirm").with_description("Ask the user to confirm"), confirm!)
 		.tool(Tool.new("touch").with_description("Notify subscribers"), touch!)
 		.around_tools(count_calls!)
+		.map_tool_results(mark_final!)
 		.resource(Resource.new("info://server", "info").with_title("Server info").with_mime_type("text/plain"), read_info!)
 		.resource(Resource.new("info://stats", "stats").with_mime_type("application/json"), read_stats!)
 		.resource_template(ResourceTemplate.new("note://{name}", "note").with_description("A note").with_mime_type("text/plain"), read_note!)

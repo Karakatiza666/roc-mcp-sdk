@@ -4,5 +4,5 @@
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"roots","arguments":{}}}
 {"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2,"reason":"user"}}
 {"jsonrpc":"2.0","id":3,"method":"ping"}
-{"jsonrpc":"2.0","id":"mcp-sdk-0","result":{"roots":[{"uri":"file:///late"}]}}
+{"jsonrpc":"2.0","id":0,"result":{"roots":[{"uri":"file:///late"}]}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"counter","arguments":{}}}

@@ -11,7 +11,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const NM = process.env.MCP_JS_NODE_MODULES ?? path.resolve(here, "../../../../roc-syntax-mcp/node_modules");
 const load = (p) => import(pathToFileURL(path.join(NM, p)).href);
 
-const { McpServer, ResourceTemplate, ResourceNotFoundError, completable, inputRequired } = await load(
+const { McpServer, ResourceTemplate, ResourceNotFoundError, completable, inputRequired, isInputRequiredResult } = await load(
 	"@modelcontextprotocol/server/dist/index.mjs",
 );
 const { serveStdio } = await load("@modelcontextprotocol/server/dist/stdio.mjs");
@@ -119,10 +119,20 @@ server.registerTool(
 	}),
 );
 
+// map_tool_results(mark_final!) in Roc: the final result of the roots tool (not an
+// input-required round) gets " [final]" after its last block when that block is text.
+const markFinal = (cb) => async (...args) => {
+	const r = await cb(...args);
+	if (isInputRequiredResult(r)) return r;
+	const last = r.content.at(-1);
+	if (last?.type !== "text") return r;
+	return { ...r, content: [...r.content.slice(0, -1), { ...last, text: `${last.text} [final]` }] };
+};
+
 server.registerTool(
 	"roots",
 	{ description: "Ask the client for its roots" },
-	counted((ctx) => {
+	counted(markFinal((ctx) => {
 		if (state.roots !== null) return text(`cached roots: ${state.roots.join(", ")}`);
 		if (!clientCaps(ctx)?.roots) return text("no roots capability");
 		const answer = ctx.mcpReq.inputResponses?.roots;
@@ -130,7 +140,7 @@ server.registerTool(
 		if (!Array.isArray(answer.roots)) return error("bad roots answer: roots is not an array");
 		state.roots = answer.roots.map((r) => r.uri);
 		return text(`roots: ${state.roots.join(", ")}`);
-	}),
+	})),
 );
 
 server.registerTool(
