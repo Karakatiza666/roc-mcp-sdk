@@ -61,11 +61,13 @@ SchemaCheck :: [].{
 			Ok(i) => (unsigned.take_first(i), unsigned.drop_first(i + 1))
 			Err(_) => (unsigned, [])
 		}
-		exp_value = match exp_part {
-			['-', .. as ds] => 0 - digits_value(ds)
-			['+', .. as ds] => digits_value(ds)
-			ds => digits_value(ds)
-		}
+		exp_sign = exp_part.first() ?? '0'
+		exp_value =
+			if exp_sign == '-' {
+				0 - digits_value(exp_part.drop_first(1))
+			} else {
+				digits_value(exp_part)
+			}
 		(int_part, frac_part) = match mantissa.find_first_index(|c| c == '.') {
 			Ok(i) => (mantissa.take_first(i), mantissa.drop_first(i + 1))
 			Err(_) => (mantissa, [])
@@ -207,9 +209,10 @@ enum_of = |values, input, path|
 	if values.any(|c| same(input, c)) {
 		ok(input)
 	} else {
-		match values {
-			[one] => fail(path, "Invalid input: expected ${show(one)}", Bool.False)
-			_ => fail(path, "Invalid option: expected one of ${Str.join_with(values.map(show), "|")}", Bool.False)
+		if values.len() == 1 {
+			fail(path, "Invalid input: expected ${show(values.first() ?? Null)}", Bool.False)
+		} else {
+			fail(path, "Invalid option: expected one of ${Str.join_with(values.map(show), "|")}", Bool.False)
 		}
 	}
 
@@ -217,33 +220,48 @@ null_schema : JsonValue
 null_schema = Object([("type", String("null"))])
 
 any_of : List(JsonValue), Try(JsonValue, [Absent]), List(Str) -> Checked
-any_of = |alternatives, input, path| match alternatives {
-	[inner, last] if last == null_schema =>
+any_of = |alternatives, input, path|
+	if alternatives.len() == 2 and alternatives.get(1) == Ok(null_schema) {
 		if input == Ok(Null) {
 			ok(input)
 		} else {
-			walk(inner, input, path)
+			walk(alternatives.get(0) ?? Object([]), input, path)
 		}
-	_ => {
-		results = alternatives.map(|alt| walk(alt, input, path))
+	} else {
+		var $results = []
+		for alt in alternatives {
+			$results = $results.append(walk(alt, input, path))
+		}
+		results = $results
 		match results.find_first(|r| r.issues.is_empty()) {
 			Ok(r) => r
-			Err(_) =>
-				match results.keep_if(|r| r.issues.all(|i| i.continues)) {
-					[only] => only
-					_ => fail(path, "Invalid input", Bool.False)
+			Err(_) => {
+				partial = results.keep_if(|r| r.issues.all(|i| i.continues))
+				if partial.len() == 1 {
+					partial.first() ?? fail(path, "Invalid input", Bool.False)
+				} else {
+					fail(path, "Invalid input", Bool.False)
 				}
+			}
 		}
 	}
-}
 
 typed : JsonValue, Try(JsonValue, [Absent]), List(Str) -> Checked
 typed = |schema, input, path| match field(schema, "type") {
 	Ok(String(t)) => of_type(schema, t, input, path)
 	Ok(Array(names)) => {
 		types = names.keep_oks(|n| n.as_str())
-		match types.find_first(|t| (of_type(schema, t, input, path)).issues.is_empty()) {
-			Ok(t) => of_type(schema, t, input, path)
+		var $found = not_found_yet
+		for t in types {
+			if $found.is_err() {
+				r = of_type(schema, t, input, path)
+				if r.issues.is_empty() {
+					$found = Ok(r)
+				}
+			}
+		}
+		match $found {
+			Ok(r) => r
 			Err(_) =>
 				match types.first() {
 					Ok(t) => of_type(schema, t, input, path)
@@ -259,18 +277,39 @@ typed = |schema, input, path| match field(schema, "type") {
 }
 
 of_type : JsonValue, Str, Try(JsonValue, [Absent]), List(Str) -> Checked
-of_type = |schema, t, input, path| match (t, input) {
-	("string", Ok(String(s))) => string_checks(schema, s, path)
-	("number", Ok(Number(_))) => number_checks(schema, input, path, Bool.False)
-	("integer", Ok(Number(_))) => number_checks(schema, input, path, Bool.True)
-	("boolean", Ok(Bool(_))) => ok(input)
-	("null", Ok(Null)) => ok(input)
-	("array", Ok(Array(items))) => array_checks(schema, items, path)
-	("object", Ok(Object(fs))) => object_checks(schema, fs, path)
-	("object", _) => type_issue(path, if (field(schema, "propertyNames").is_ok()) "record" else "object", input)
-	("integer", _) => type_issue(path, "number", input)
-	("string", _) | ("number", _) | ("boolean", _) | ("null", _) | ("array", _) => type_issue(path, t, input)
-	_ => ok(input)
+of_type = |schema, t, input, path| {
+	v = input ?? Null
+	present = !(is_absent(input))
+	if t == "string" {
+		match v {
+			String(s) if present => string_checks(schema, s, path)
+			_ => type_issue(path, t, input)
+		}
+	} else if t == "number" or t == "integer" {
+		match v {
+			Number(_) if present => number_checks(schema, input, path, t == "integer")
+			_ => type_issue(path, "number", input)
+		}
+	} else if t == "boolean" {
+		match v {
+			Bool(_) if present => ok(input)
+			_ => type_issue(path, t, input)
+		}
+	} else if t == "null" {
+		if (present and v == Null) ok(input) else type_issue(path, t, input)
+	} else if t == "array" {
+		match v {
+			Array(items) if present => array_checks(schema, items, path)
+			_ => type_issue(path, t, input)
+		}
+	} else if t == "object" {
+		match v {
+			Object(fs) if present => object_checks(schema, fs, path)
+			_ => type_issue(path, if (field(schema, "propertyNames").is_ok()) "record" else "object", input)
+		}
+	} else {
+		ok(input)
+	}
 }
 
 bound : JsonValue, Str -> Try({ value : F64, text : Str }, [None])
@@ -324,16 +363,12 @@ number_checks = |schema, input, path, integer| {
 			}
 
 		## zod writes the safe-integer range of `int()` as minimum/maximum: not a check of its own.
-		explicit = |k| match bound(schema, k) {
-			Ok(b) if integer and ((k == "minimum" and b.value == 0.0 - max_safe) or (k == "maximum" and b.value == max_safe)) => Err(None)
-			other => other
-		}
-		low = match (explicit("minimum"), explicit("exclusiveMinimum")) {
+		low = match (explicit(schema, integer, "minimum"), explicit(schema, integer, "exclusiveMinimum")) {
 			(Ok(b), _) if f < b.value => [size_issue(path, "Too small: expected number to be >=${b.text}")]
 			(_, Ok(b)) if f <= b.value => [size_issue(path, "Too small: expected number to be >${b.text}")]
 			_ => []
 		}
-		high = match (explicit("maximum"), explicit("exclusiveMaximum")) {
+		high = match (explicit(schema, integer, "maximum"), explicit(schema, integer, "exclusiveMaximum")) {
 			(Ok(b), _) if f > b.value => [size_issue(path, "Too big: expected number to be <=${b.text}")]
 			(_, Ok(b)) if f >= b.value => [size_issue(path, "Too big: expected number to be <${b.text}")]
 			_ => []
@@ -343,12 +378,24 @@ number_checks = |schema, input, path, integer| {
 	}
 }
 
+## A bound of a number schema; zod writes the safe-integer range of `int()` as
+## minimum/maximum, which is not a check of its own.
+explicit : JsonValue, Bool, Str -> Try({ value : F64, text : Str }, [None])
+explicit = |schema, integer, k| match bound(schema, k) {
+	Ok(b) if integer and ((k == "minimum" and b.value == 0.0 - max_safe) or (k == "maximum" and b.value == max_safe)) => Err(None)
+	other => other
+}
+
 array_checks : JsonValue, List(JsonValue), List(Str) -> Checked
 array_checks = |schema, items, path| {
-	elements = match field(schema, "items") {
-		Ok(item_schema) => items.map_with_index(|x, i| walk(item_schema, Ok(x), path.append(i.to_str())))
-		Err(_) => items.map(|x| ok(Ok(x)))
+	item_schema = field(schema, "items") ?? Object([])
+	var $elements = []
+	var $i = 0.U64
+	for x in items {
+		$elements = $elements.append(walk(item_schema, Ok(x), path.append($i.to_str())))
+		$i = $i + 1
 	}
+	elements = $elements
 	n = items.len().to_f64()
 	element_issues = elements.join_map(|r| r.issues)
 	sized = !(element_issues.any(|i| i.fatal))
@@ -362,6 +409,15 @@ array_checks = |schema, items, path| {
 	}
 	issues = element_issues.concat(small).concat(big)
 	{ issues, value: if (issues.is_empty()) Ok(Array(elements.keep_oks(|r| r.value))) else Err(Absent) }
+}
+
+not_found_yet : Try(Checked, [None])
+not_found_yet = Err(None)
+
+lookup : List((Str, JsonValue)), Str -> Try(JsonValue, [Absent])
+lookup = |fs, k| match fs.find_first(|(name, _)| name == k) {
+	Ok((_, v)) => Ok(v)
+	Err(_) => Err(Absent)
 }
 
 object_checks : JsonValue, List((Str, JsonValue)), List(Str) -> Checked
@@ -378,37 +434,38 @@ object_checks = |schema, fs, path| {
 	## Required names without a schema are checked as `{}`.
 	unlisted = required.drop_if(|n| props.any(|(k, _)| k == n)).map(|n| (n, Object([])))
 	known = props.concat(unlisted)
-	lookup = |k| match fs.find_first(|(name, _)| name == k) {
-		Ok((_, v)) => Ok(v)
-		Err(_) => Err(Absent)
-	}
-	results = known.map(
-		|(k, sub)| {
-			v = lookup(k)
-			r =
-				if is_absent(v) and !(required.contains(k)) {
-					match field(sub, "default") {
-						Ok(d) => ok(Ok(d))
-						Err(_) => ok(Err(Absent))
-					}
-				} else {
-					walk(sub, v, path.append(k))
+	var $results = []
+	for (k, sub) in known {
+		v = lookup(fs, k)
+		r =
+			if is_absent(v) and !(required.contains(k)) {
+				match field(sub, "default") {
+					Ok(d) => ok(Ok(d))
+					Err(_) => ok(Err(Absent))
 				}
-			(k, r)
-		},
-	)
+			} else {
+				walk(sub, v, path.append(k))
+			}
+		$results = $results.append((k, r))
+	}
+	results = $results
 	extras = fs.drop_if(|(k, _)| known.any(|(name, _)| name == k))
 	(extra_issues, kept) = match field(schema, "additionalProperties") {
 		Ok(Bool(b)) if !b =>
-			match extras {
-				[] => ([], [])
-				[(k, _)] => ([{ path, message: "Unrecognized key: ${quote(k)}", continues: Bool.False, fatal: Bool.False }], [])
-				_ => ([{ path, message: "Unrecognized keys: ${Str.join_with(extras.map(|(k, _)| quote(k)), ", ")}", continues: Bool.False, fatal: Bool.False }], [])
+			if extras.is_empty() {
+				([], [])
+			} else {
+				noun = if (extras.len() == 1) "key" else "keys"
+				([{ path, message: "Unrecognized ${noun}: ${Str.join_with(extras.map(|(k, _)| quote(k)), ", ")}", continues: Bool.False, fatal: Bool.False }], [])
 			}
 		Ok(Object([])) | Ok(Bool(_)) => ([], extras)
 		Ok(Object(sub_fields)) => {
 			sub = Object(sub_fields)
-			checked = extras.map(|(k, x)| (k, walk(sub, Ok(x), path.append(k))))
+			var $checked = []
+			for (k, x) in extras {
+				$checked = $checked.append((k, walk(sub, Ok(x), path.append(k))))
+			}
+			checked = $checked
 			(checked.join_map(|(_, r)| r.issues), checked.keep_oks(|(k, r)| r.value.map_ok(|x| (k, x))))
 		}
 		_ => ([], [])
