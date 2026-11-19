@@ -289,6 +289,20 @@ Engine :: [].{
 		)
 	}
 
+	## The state to continue from after `(state_after_run, outcome) = call.run!(before, ctx)`:
+	## with `NeedInput` it is `before` (the round's changes are dropped, so a call changes the
+	## state once; `Server.with_input_round_state(Keep)` keeps them), else the returned state.
+	## Transports call it after every `run!`.
+	state_after : Server(state), state, state, Outcome(JsonValue) -> state
+	state_after = |server, before, after, outcome| match outcome {
+		NeedInput(_) =>
+			match server.parts().round_state {
+				Discard => before
+				Keep => after
+			}
+		_ => after
+	}
+
 	## The earliest input deadline, for a transport that can wait with a timeout.
 	next_deadline : Engine.Session -> Try(U64, [None])
 	next_deadline = |sess| match sess.parked.map(|p| p.deadline_ms).min() {

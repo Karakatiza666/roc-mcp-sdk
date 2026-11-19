@@ -26,7 +26,7 @@ p! = |s, _c, _a| (s, Outcome.done({ description: Err(None), messages: [] }))
 
 server : Server({})
 server =
-	["roots", "two", "url", "forever", "stateonly", "slow", "sample", "d_roots", "d_two", "d_form", "d_sample", "d_url"]
+	["roots", "two", "url", "forever", "stateonly", "slow", "sample", "d_roots", "d_two", "d_form", "d_sample", "d_url", "memo"]
 		.fold(Server.new({ name: "f", version: "2" }), |s, n| s.tool_json(Tool.new(n), any!))
 		.prompt(Prompt.new("askp"), p!)
 
@@ -46,6 +46,9 @@ describe = |a| match a {
 
 need : Input.Required -> Outcome(JsonValue)
 need = |r| Outcome.need_input(r.with_progress_token(Bool.True))
+
+when_round : U64, Outcome(JsonValue), Outcome(JsonValue), Outcome(JsonValue) -> Outcome(JsonValue)
+when_round = |n, r0, r1, rest| if (n == 0) r0 else if (n == 1) r1 else rest
 
 ## The handlers' behaviour, as a function of the round and the answers.
 script : Engine.Call({}) -> Outcome(JsonValue)
@@ -67,6 +70,14 @@ script = |call| {
 			"sample" => if (first) need(Input.Required.one("s", CreateMessage(Session.json("{\"messages\":[],\"maxTokens\":5,\"tools\":[]}")))) else Session.text(describe(c.input("s")))
 			"forever" => need(Input.Required.one("roots", ListRoots))
 			"stateonly" => if (first) need(Input.Required.keep_state("s1")) else Session.text("state ${c.request_state() ?? "none"} round ${c.round().to_str()}")
+			# Memoizes across rounds of one call in the request state; a distinct key per round.
+			"memo" =>
+				when_round(
+					c.round(),
+					need(Input.Required.one("roots", ListRoots).with_state("found=42")),
+					need(Input.Required.one("roots2", ListRoots).with_state("${c.request_state() ?? "none"};second")),
+					Session.text("${c.request_state() ?? "none"} | ${describe(c.input("roots"))} | ${describe(c.input("roots2"))}"),
+				)
 			"slow" => if (first) need(Input.Required.one("roots", ListRoots).with_timeout_ms(2000)) else Session.text(describe(c.input("roots")))
 			# The default form: the JS direct calls (no progress token).
 			"d_roots" => if (first) Outcome.need_input(Input.Required.one("roots", ListRoots)) else Session.text(describe(c.input("roots")))
@@ -323,4 +334,28 @@ expect {
 			}
 		Err(_) => Bool.False
 	}
+}
+
+# Per-call carry-over: the request state rides in the parked entry from round to round, and
+# Ctx.input holds only the last round's answers, so each round asks under its own key.
+expect {
+	r = after_init(server, all_caps, [call("2", "memo"), answer("0", "{\"roots\":[]}"), answer("1", "{\"roots\":[{\"uri\":\"file:///x\"}]}")])
+	r.out == [roots_request("0"), roots_request("1"), text_result("2", "found=42;second | not asked | answered {\\\"roots\\\":[{\\\"uri\\\":\\\"file:///x\\\"}]}")]
+}
+
+# The state a handler returns with NeedInput is dropped (the next round starts from the state
+# before this one, as a JS handler that awaits runs its effects once); Keep restores the old rule.
+expect {
+	ask : Outcome(JsonValue)
+	ask = Outcome.need_input(Input.Required.one("roots", ListRoots))
+	done : Outcome(JsonValue)
+	done = Outcome.done(Null)
+	kept : Server(U64)
+	kept = Server.new({ name: "k", version: "1" }).with_input_round_state(Keep)
+	fresh : Server(U64)
+	fresh = Server.new({ name: "k", version: "1" })
+	Engine.state_after(fresh, 1, 2, ask) == 1
+		and Engine.state_after(fresh, 1, 2, done) == 2
+		and Engine.state_after(fresh, 1, 2, Outcome.fail(McpError.internal("x"))) == 2
+		and Engine.state_after(kept, 1, 2, ask) == 2
 }

@@ -137,8 +137,9 @@ drive! = |server, io, state, step| {
 	var $session = step.session
 	for call in step.calls {
 		(s, outcome) = (call.run!)($state, call.ctx.with_sender(send!))
+		kept = Engine.state_after(server, $state, s, outcome)
 		done = Engine.finish(server, $session, call, outcome, (io.now_ms!)())
-		(s2, sess2) = drive!(server, io, s, done)?
+		(s2, sess2) = drive!(server, io, kept, done)?
 		$state = s2
 		$session = sess2
 	}

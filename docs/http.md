@@ -138,7 +138,7 @@ The body decides the era; the headers are cross-checks.
 
 There are no sessions in the modern era: each POST is complete in itself. `handle!` creates a
 fresh `Engine.Session.new`, feeds the message with `Engine.receive_json`, runs each `Call`
-(`call.run!(state, ctx)`) and `Engine.finish`es it, threading `state`, exactly as the stdio loop
+(`call.run!(state, ctx)`) and `Engine.finish`es it, threading `state` through `Engine.state_after` (the state returned with `NeedInput` is dropped), exactly as the stdio loop
 does, until no calls remain. Then:
 
 - a notification: 202 with an empty body;

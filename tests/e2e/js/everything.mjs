@@ -37,9 +37,15 @@ const server = new McpServer(
 const clientCaps = (ctx) => ctx.mcpReq.envelope?.["io.modelcontextprotocol/clientCapabilities"] ?? server.server.getClientCapabilities();
 
 // The middleware (around_tools count_calls!): counts every handler run.
-const counted = (cb) => (...args) => {
+// A round that asks for input leaves no trace in the state: the Roc engine drops the state
+// a handler returns with NeedInput (DESIGN 2), so a call counts once, as a JS direct call
+// (one handler run with awaits) would.
+const counted = (cb) => async (...args) => {
+	const before = state.toolCalls;
 	state.toolCalls += 1;
-	return cb(...args);
+	const r = await cb(...args);
+	if (isInputRequiredResult(r)) state.toolCalls = before;
+	return r;
 };
 
 server.registerTool(

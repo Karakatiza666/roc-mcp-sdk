@@ -72,7 +72,14 @@ Concepts:
   (`params._meta.progressToken`). Each request of one call needs its own key, also in later
   rounds: `Ctx.input` gives only the previous round's answers and the handler runs again from the
   start, so a second roots request in the same call needs another key (and anything the handler
-  must keep across rounds goes in `with_state`). `Input.roots` rejects a root whose URI is not
+  must keep across rounds goes in `with_state`). The state a handler returns together with
+  `NeedInput` is dropped: the next round starts from the state before this one, so app-state
+  changes happen once per call, in the final round, as in a JS handler that awaits
+  (`Server.with_input_round_state(Keep)` keeps them instead). Work done before asking runs again
+  in each round; to do it once, put its result in the request state
+  (`Input.Required.one(...).with_state(memo)`, read back with `Ctx.request_state`): on a 2025
+  connection the SDK keeps it with the waiting request, on a 2026-07-28 connection it goes to the
+  client and comes back with the retry (checked by `Server.with_request_state_verifier`). `Input.roots` rejects a root whose URI is not
   `file://` (as JS does), and `Input.file_uri_to_path` converts one to a path like Node's
   `fileURLToPath`.
 - **Middleware.** `Server.around_tools` wraps every handler run, so a call that asks for input
