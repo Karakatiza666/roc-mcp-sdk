@@ -36,11 +36,21 @@ capped() {
 }
 
 FAIL=0
+# Build time is part of the contract (DESIGN 12.21): each build's duration is printed, and one
+# over BUILD_BUDGET seconds (default 120) fails the run. A cached build takes about a second.
+BUILD_BUDGET=${BUILD_BUDGET:-120}
 for ex in everything hello; do
+	start=$(date +%s)
 	if ! scripts/roc.sh build "examples/$ex.roc" --output="$OUT/$ex" >"$OUT/$ex.build.log" 2>&1; then
 		echo "FAIL: build examples/$ex.roc (see $OUT/$ex.build.log)"
 		tail -30 "$OUT/$ex.build.log"
 		exit 1
+	fi
+	took=$(($(date +%s) - start))
+	echo "build examples/$ex.roc: ${took} s (budget ${BUILD_BUDGET} s)"
+	if [ "$took" -gt "$BUILD_BUDGET" ]; then
+		echo "FAIL: building examples/$ex.roc took ${took} s, over the ${BUILD_BUDGET} s budget (DESIGN 12.21)"
+		FAIL=1
 	fi
 done
 

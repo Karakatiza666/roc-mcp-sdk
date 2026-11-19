@@ -176,26 +176,29 @@ field = |schema, k| schema.get(k)
 number_of : JsonValue -> Try(F64, [NotANumber])
 number_of = |v| v.to_f64()
 
+## `walk`, `any_of`, `typed` and `of_type` each start with an early `return`, which keeps the
+## optimizer from inlining them into each other (DESIGN 12.21).
 walk : JsonValue, Try(JsonValue, [Absent]), List(Str) -> Checked
-walk = |schema, input, path| match schema {
-	Object(_) =>
-		match (input, field(schema, "default")) {
-			(Err(Absent), Ok(d)) => ok(Ok(d))
-			_ =>
-				match field(schema, "anyOf") {
-					Ok(Array(alternatives)) => any_of(alternatives, input, path)
-					_ =>
-						match field(schema, "const") {
-							Ok(c) => if (same(input, c)) ok(input) else fail(path, "Invalid input: expected ${show(c)}", Bool.False)
-							Err(_) =>
-								match field(schema, "enum") {
-									Ok(Array(values)) => enum_of(values, input, path)
-									_ => typed(schema, input, path)
-								}
-						}
-				}
-		}
-	_ => ok(input)
+walk = |schema, input, path| {
+	if schema.as_object().is_err() {
+		return ok(input)
+	}
+	match (input, field(schema, "default")) {
+		(Err(Absent), Ok(d)) => ok(Ok(d))
+		_ =>
+			match field(schema, "anyOf") {
+				Ok(Array(alternatives)) => any_of(alternatives, input, path)
+				_ =>
+					match field(schema, "const") {
+						Ok(c) => if (same(input, c)) ok(input) else fail(path, "Invalid input: expected ${show(c)}", Bool.False)
+						Err(_) =>
+							match field(schema, "enum") {
+								Ok(Array(values)) => enum_of(values, input, path)
+								_ => typed(schema, input, path)
+							}
+					}
+			}
+	}
 }
 
 same : Try(JsonValue, [Absent]), JsonValue -> Bool
@@ -228,6 +231,9 @@ any_of = |alternatives, input, path|
 			walk(alternatives.get(0) ?? Object([]), input, path)
 		}
 	} else {
+		if alternatives.is_empty() {
+			return fail(path, "Invalid input", Bool.False)
+		}
 		var $results = []
 		for alt in alternatives {
 			$results = $results.append(walk(alt, input, path))
@@ -251,6 +257,9 @@ typed = |schema, input, path| match field(schema, "type") {
 	Ok(String(t)) => of_type(schema, t, input, path)
 	Ok(Array(names)) => {
 		types = names.keep_oks(|n| n.as_str())
+		if types.is_empty() {
+			return ok(input)
+		}
 		var $found = not_found_yet
 		for t in types {
 			if $found.is_err() {
@@ -278,6 +287,9 @@ typed = |schema, input, path| match field(schema, "type") {
 
 of_type : JsonValue, Str, Try(JsonValue, [Absent]), List(Str) -> Checked
 of_type = |schema, t, input, path| {
+	if t == "" {
+		return ok(input)
+	}
 	v = input ?? Null
 	present = !(is_absent(input))
 	if t == "string" {
