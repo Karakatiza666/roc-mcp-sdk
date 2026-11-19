@@ -9,5 +9,6 @@ ROC=${ROC:-/home/george/dev/Karakatiza666/roc-syntax-mcp/roc_nightly-linux_x86_6
 mkdir -p "$ROOT/.tmp/tmp" "$ROOT/.tmp/xdg/roc"
 export TMPDIR=$ROOT/.tmp/tmp XDG_CACHE_HOME=$ROOT/.tmp/xdg ROC_CACHE_DIR=$ROOT/.tmp/xdg/roc
 # One compiler job at a time across all agents: wait for the lock (max 30 min).
-exec flock -w 1800 "$ROOT/.tmp/roc.lock" \
+# ROC_LOCK overrides the lock file (worktrees share the main checkout's lock this way).
+exec flock -w 1800 "${ROC_LOCK:-$ROOT/.tmp/roc.lock}" \
   systemd-run --user --scope --quiet -p MemoryMax=16G -p MemorySwapMax=0 timeout 600 "$ROC" "$@"
