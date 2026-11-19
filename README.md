@@ -69,25 +69,61 @@ Concepts:
   it with `Ctx.input(ctx, "roots")`. The request has the form of the JS direct call
   (`server.listRoots({})`: `{"method":"roots/list","params":{},"jsonrpc":"2.0","id":0}`, integer
   ids from 0); `.with_progress_token(Bool.True)` gives the form of the JS `inputRequired` shim
-  (`params._meta.progressToken`). Each request of one call needs its own key, also in later
-  rounds: `Ctx.input` gives only the previous round's answers and the handler runs again from the
-  start, so a second roots request in the same call needs another key (and anything the handler
-  must keep across rounds goes in `with_state`). The state a handler returns together with
-  `NeedInput` is dropped: the next round starts from the state before this one, so app-state
-  changes happen once per call, in the final round, as in a JS handler that awaits
-  (`Server.with_input_round_state(Keep)` keeps them instead). Work done before asking runs again
-  in each round; to do it once, put its result in the request state
-  (`Input.Required.one(...).with_state(memo)`, read back with `Ctx.request_state`): on a 2025
-  connection the SDK keeps it with the waiting request, on a 2026-07-28 connection it goes to the
-  client and comes back with the retry (checked by `Server.with_request_state_verifier`). `Input.roots` rejects a root whose URI is not
-  `file://` (as JS does), and `Input.file_uri_to_path` converts one to a path like Node's
-  `fileURLToPath`.
+  (`params._meta.progressToken`). The handler runs again from the top in each round, and the
+  answers of all earlier rounds of the call stay readable; see
+  [Asking the client for input](#asking-the-client-for-input). `Input.roots` rejects a root whose
+  URI is not `file://` (as JS does), and `Input.file_uri_to_path` converts one to a path like
+  Node's `fileURLToPath`.
 - **Middleware.** `Server.around_tools` wraps every handler run, so a call that asks for input
   passes through it once per round (`NeedInput` outcomes, then the final `Done`).
   `Server.map_tool_results` changes only the final result, like a JS wrapper around a tool
   callback.
 - **Notifications** from a handler: `Ctx.log!`, `Ctx.progress!`, `Ctx.list_changed!`,
   `Ctx.resource_updated!`, `Ctx.notify!`.
+
+## Asking the client for input
+
+A handler that needs roots, an elicitation or a sampling result does not wait for it. It returns
+`Outcome.need_input(...)`, and the SDK calls it again when the answers are in. Each call is a
+**round**:
+
+- **The handler runs again from the top in each round.** It sees the same arguments, and
+  `Ctx.round` counts the rounds (0 on the first run).
+- **Answers accumulate.** `Ctx.input(key)` gives the answer to `key` from any earlier round of
+  the same call, or `NotAsked` if `key` was never asked. If a key is asked again, the latest
+  answer wins. So ask for a key only while it reads `NotAsked`:
+
+  ```roc
+  match (ctx.input("roots"), ctx.input("confirm")) {
+  	(NotAsked, _) => (st, Outcome.need_input(Input.Required.one("roots", ListRoots)))
+  	(_, NotAsked) => (st, Outcome.need_input(Input.Required.one("confirm", ElicitForm(form))))
+  	(roots, confirm) => (st, Outcome.done(work(roots, confirm)))
+  }
+  ```
+
+  A handler that asks again for a key it already has an answer for repeats the request in every
+  round. On a 2025 connection, the call ends after 8 rounds. The SDK logs this once per call to
+  the transport's log (stderr), and the log line names the key.
+- **The state of a `NeedInput` round is discarded.** The next round starts from the app state
+  before this round, so state changes happen once, in the final round, as in a JS handler that
+  awaits. `Server.with_input_round_state(Keep)` keeps the state of every round instead.
+- **Side effects before asking repeat.** A process spawned, a file written, or a `Ctx.log!` sent
+  before the handler returns `NeedInput` happens again in the next round. Do this work after you
+  have the input. Or do it once and keep its result in the request state:
+  `Input.Required.one(...).with_state(memo)` stores the result, and `Ctx.request_state` reads it
+  back in later rounds.
+
+Where the answers and the request state are kept depends on the protocol era:
+
+- **2025 connection:** the SDK keeps them with the waiting request (`Engine.Session.to_json`
+  stores them too).
+- **2026-07-28 connection:** the client sends only the answers to the latest round's requests
+  (spec: the keys of `inputResponses` are those of the latest `inputRequests`). The SDK therefore
+  sends the earlier answers to the client in `requestState`, together with your own state, and
+  the client echoes them back on its retry.
+  - `Server.with_request_state_verifier` sees only your own state.
+  - Answers come from the client in both eras, so check them before you trust them (`Input.roots`,
+    `Input.elicitation`).
 
 ## The basic-cli adapter
 

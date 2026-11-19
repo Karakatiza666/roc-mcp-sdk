@@ -40,3 +40,8 @@ These are documented in the README ("The loop is sequential") and DESIGN 2 / 7:
   piped input and fast handlers, the output is the same.
 - Input deadlines fire when the next line arrives on basic-cli (no timed read). With the JS
   default of 600 s, no transcript reaches a deadline.
+- `Ctx.input` keeps the answers of the earlier rounds of a call, while JS gives only the latest
+  round's. On 2026-07-28, an `input_required` result of a retry that already has answers carries
+  them in `requestState` (`mcp-sdk-carry:...`). JS sends only the app's state there (DESIGN 2,
+  "Answers accumulate"). The twin's handlers never ask again after an answer, so no transcript
+  shows the difference.

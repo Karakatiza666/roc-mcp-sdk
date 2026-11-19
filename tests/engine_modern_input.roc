@@ -5,6 +5,10 @@ import pkg.LogLevel
 import pkg.Ctx
 import pkg.Server
 import pkg.Engine
+import pkg.Tool
+import pkg.ToolResult
+import pkg.Input
+import pkg.Outcome
 import Support/Session
 import Support/Modern
 
@@ -226,3 +230,100 @@ close_close = [
 	"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1,\"io.modelcontextprotocol/serverInfo\":{\"name\":\"m\",\"version\":\"1\"}}}}",
 	"{\"jsonrpc\":\"2.0\",\"id\":\"b\",\"result\":{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":\"b\",\"io.modelcontextprotocol/serverInfo\":{\"name\":\"m\",\"version\":\"1\"}}}}",
 ]
+
+# ---- Answers accumulate over the retries of one call (DESIGN 5, row input_required). The
+# client sends inputResponses only for the latest inputRequests (spec, "InputResponses": the
+# keys of the InputRequests map), and requestState is the server's place for context across
+# retries, so the engine carries the earlier answers there ("mcp-sdk-carry:...", Modern.carry).
+
+acc_server : Server({})
+acc_server =
+	Modern.server
+		.tool_json(Tool.new("acc"), |s, _c, _a| (s, Outcome.done(ToolResult.text(""))))
+		.tool_json(Tool.new("again"), |s, _c, _a| (s, Outcome.done(ToolResult.text(""))))
+
+shown : Input.Answer -> Str
+shown = |a| match a {
+	Answered(j) => j.to_str()
+	_ => "-"
+}
+
+## "acc" asks "roots", then "roots2" (with a state), then answers with both; "again" asks
+## "roots" every time (the loop the diagnostic is for).
+acc_script : Engine.Call({}) -> Outcome(JsonValue)
+acc_script = |call| {
+	c = call.ctx
+	match Session.tool_name(call) {
+		"acc" =>
+			match (c.input("roots"), c.input("roots2")) {
+				(NotAsked, _) => Outcome.need_input(Input.Required.one("roots", ListRoots))
+				(_, NotAsked) => Outcome.need_input(Input.Required.one("roots2", ListRoots).with_state("good2"))
+				(a, b) => Session.text("${shown(a)} | ${shown(b)} | ${c.request_state() ?? "none"}")
+			}
+		"again" => Outcome.need_input(Input.Required.one("roots", ListRoots))
+		_ => Modern.script(call)
+	}
+}
+
+acc_call : Str, Str, Str -> Str
+acc_call = |id, tool, retry| "{\"jsonrpc\":\"2.0\",\"id\":${id},\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":{}${retry},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{\"roots\":{}},\"io.modelcontextprotocol/clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}}"
+
+acc_run : List(Str) -> Session.Run
+acc_run = |lines| Session.drive(acc_server, Engine.Session.new, {}, lines, acc_script, 0)
+
+## `,"requestState":<the requestState of the first line of `out`>`, as the client echoes it.
+state_of : List(Str) -> Str
+state_of = |out| ",\"requestState\":${(Session.json(out.first() ?? "{}").get_or_null("result").get_or_null("requestState")).to_str()}"
+
+roots_answer : Str
+roots_answer = ",\"inputResponses\":{\"roots\":{\"roots\":[]}}"
+
+# Three requests of one call: the second round's result carries the first answer (and the
+# app's state) in requestState; the third request answers only roots2 and the handler sees both.
+expect {
+	r1 = acc_run([acc_call("1", "acc", "")])
+	r2 = acc_run([acc_call("2", "acc", roots_answer)])
+	r3 = acc_run([acc_call("3", "acc", ",\"inputResponses\":{\"roots2\":{\"roots\":[{\"uri\":\"file:///b\"}]}}${state_of(r2.out)}")])
+	r1.out == ["{\"result\":{\"resultType\":\"input_required\",\"inputRequests\":{\"roots\":{\"method\":\"roots/list\"}},\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":\"m\",\"version\":\"1\"}}},\"jsonrpc\":\"2.0\",\"id\":1}"]
+		and r2.out == ["{\"result\":{\"resultType\":\"input_required\",\"inputRequests\":{\"roots2\":{\"method\":\"roots/list\"}},\"requestState\":\"mcp-sdk-carry:{\\\"answers\\\":{\\\"roots\\\":{\\\"roots\\\":[]}},\\\"state\\\":\\\"good2\\\"}\",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":\"m\",\"version\":\"1\"}}},\"jsonrpc\":\"2.0\",\"id\":2}"]
+		and r3.out == ["{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"roots\\\":[]} | {\\\"roots\\\":[{\\\"uri\\\":\\\"file:///b\\\"}]} | good2\"}],\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":\"m\",\"version\":\"1\"}}},\"jsonrpc\":\"2.0\",\"id\":3}"]
+		and r1.log == []
+		and r2.log == []
+		and r3.log == []
+}
+
+# The retry's own answer for a carried key wins; the app's state is unwrapped for Ctx.
+expect {
+	r2 = acc_run([acc_call("2", "acc", roots_answer)])
+	line = acc_call("3", "acc", ",\"inputResponses\":{\"roots\":{\"roots\":[{\"uri\":\"file:///c\"}]},\"roots2\":{\"roots\":[]}}${state_of(r2.out)}")
+	match Engine.receive(acc_server, Engine.Session.new, {}, line).calls {
+		[call] =>
+			call.ctx.input("roots") == Answered(Session.json("{\"roots\":[{\"uri\":\"file:///c\"}]}"))
+				and call.ctx.input("roots2") == Answered(Session.json("{\"roots\":[]}"))
+				and call.ctx.request_state() == Ok("good2")
+				and call.ctx.round() == 1
+		_ => Bool.False
+	}
+}
+
+# A carried app state goes through the verifier (refused: -32602); a carried state that does
+# not decode is refused too; a carry without an app state needs no verifier.
+expect {
+	bad = acc_run([acc_call("4", "acc", ",\"requestState\":\"mcp-sdk-carry:{\\\"answers\\\":{},\\\"state\\\":\\\"bad\\\"}\"")])
+	broken = acc_run([acc_call("5", "acc", ",\"requestState\":\"mcp-sdk-carry:{\\\"answers\\\":[]}\"")])
+	bare = acc_run([acc_call("6", "acc", ",\"requestState\":\"mcp-sdk-carry:{\\\"answers\\\":{\\\"roots\\\":{\\\"roots\\\":[]}}}\"")])
+	refused = |id| "{\"jsonrpc\":\"2.0\",\"id\":${id},\"error\":{\"code\":-32602,\"message\":\"Invalid or expired requestState\",\"data\":{\"reason\":\"invalid_request_state\"}}}"
+	bad.out == [refused("4")] and broken.out == [refused("5")] and Session.first_has(bare.out, "\"inputRequests\":{\"roots2\"")
+}
+
+# Asking again for a key the call has an answer for: one diagnostic for the transport's log,
+# naming the key; the carried state remembers it, so the next retry logs nothing.
+expect {
+	r2 = acc_run([acc_call("2", "again", roots_answer)])
+	r3 = acc_run([acc_call("3", "again", "${roots_answer}${state_of(r2.out)}")])
+	r2.log.len() == 1
+		and Session.first_has(r2.log, "asked again for input 'roots'")
+		and Session.first_has(r2.out, "\\\"noted\\\":true")
+		and r3.log == []
+		and Session.first_has(r3.out, "input_required")
+}
