@@ -695,8 +695,9 @@ tools_call = |parts, sess, maybe_st, id, params, msg, rr|
 		not_found(sess, id)
 	} else {
 		issues = params_issues(present(msg, "params"), Bool.False)
-		match (issues, params.get_or_null("name"), params.get_or_null("arguments")) {
-			([], String(tool_name), args_raw) => {
+		name_ok = if (issues.is_empty()) params.get_or_null("name") else Null
+		match (name_ok, params.get_or_null("arguments")) {
+			(String(tool_name), args_raw) => {
 				args = match args_raw {
 					Object(fs) => Object(fs)
 					_ => Object([])
@@ -707,15 +708,7 @@ tools_call = |parts, sess, maybe_st, id, params, msg, rr|
 						if !(allowed(maybe_st, entry.enabled)) {
 							error_reply(sess, id, McpError.invalid_params("Tool ${tool_name} disabled"))
 						} else {
-							checked =
-								if parts.input_validation and entry.validate and entry.tool.has_input_schema() {
-									match SchemaCheck.validate(entry.tool.input_schema(), args) {
-										Ok(v) => Ok(v)
-										Err(Invalid(xs)) => Err("Invalid arguments for tool ${tool_name}: ${Str.join_with(xs, ", ")}")
-									}
-								} else {
-									Ok(args)
-								}
+							checked = checked_tool_args(parts.input_validation and entry.validate, entry.tool, args)
 							prepared = match checked {
 								Ok(v) => (entry.prepare)(v)
 								Err(why) => Err(why)
@@ -951,31 +944,16 @@ prompts_get = |parts, sess, maybe_st, id, params, msg, rr|
 		not_found(sess, id)
 	} else {
 		issues = params_issues(present(msg, "params"), Bool.True)
-		match (issues, params.get_or_null("name")) {
-			([], String(prompt_name)) =>
+		name_ok = if (issues.is_empty()) params.get_or_null("name") else Null
+		match name_ok {
+			String(prompt_name) =>
 				match parts.prompts.find_first(|p| p.prompt.name() == prompt_name) {
 					Err(_) => error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} not found"))
 					Ok(entry) =>
 						if !(allowed(maybe_st, entry.enabled)) {
 							error_reply(sess, id, McpError.invalid_params("Prompt ${prompt_name} disabled"))
 						} else {
-							declared = entry.prompt.arguments()
-							checked =
-								if parts.input_validation and !(declared.is_empty()) {
-									match present(params, "arguments") {
-										Err(Absent) => Err("Invalid arguments for prompt ${prompt_name}: Invalid input: expected object, received undefined")
-										Ok(a) =>
-											match SchemaCheck.validate(prompt_schema(declared), a) {
-												Ok(v) => Ok(v)
-												Err(Invalid(xs)) => Err("Invalid arguments for prompt ${prompt_name}: ${Str.join_with(xs, ", ")}")
-											}
-									}
-								} else {
-									match params.get_or_null("arguments") {
-										Object(fs) => Ok(Object(fs))
-										_ => Ok(Object([]))
-									}
-								}
+							checked = checked_prompt_args(parts.input_validation, entry.prompt, params)
 							prepared = match checked {
 								Ok(args) => (entry.prepare)(args)
 								Err(why) => Err(why)
@@ -1004,6 +982,40 @@ prompts_get = |parts, sess, maybe_st, id, params, msg, rr|
 			_ => error_reply(sess, id, McpError.internal(Wire.pretty(Array(issues))))
 		}
 	}
+
+## tools/call arguments checked against the tool's input schema (`Err`: the text after
+## "Input validation error: "). Not generic, so it is compiled once.
+checked_tool_args : Bool, Tool, JsonValue -> Try(JsonValue, Str)
+checked_tool_args = |on, t, args|
+	if on and t.has_input_schema() {
+		match SchemaCheck.validate(t.input_schema(), args) {
+			Ok(v) => Ok(v)
+			Err(Invalid(xs)) => Err("Invalid arguments for tool ${t.name()}: ${Str.join_with(xs, ", ")}")
+		}
+	} else {
+		Ok(args)
+	}
+
+## prompts/get arguments checked against the declared ones (`Err`: the -32602 message).
+checked_prompt_args : Bool, Prompt, JsonValue -> Try(JsonValue, Str)
+checked_prompt_args = |on, p, params| {
+	declared = p.arguments()
+	if on and !(declared.is_empty()) {
+		match present(params, "arguments") {
+			Err(Absent) => Err("Invalid arguments for prompt ${p.name()}: Invalid input: expected object, received undefined")
+			Ok(a) =>
+				match SchemaCheck.validate(prompt_schema(declared), a) {
+					Ok(v) => Ok(v)
+					Err(Invalid(xs)) => Err("Invalid arguments for prompt ${p.name()}: ${Str.join_with(xs, ", ")}")
+				}
+		}
+	} else {
+		match params.get_or_null("arguments") {
+			Object(fs) => Ok(Object(fs))
+			_ => Ok(Object([]))
+		}
+	}
+}
 
 ## The JSON Schema of a prompt's arguments, as the JS SDK's `argsSchema` of strings.
 prompt_schema : List(Prompt.Argument) -> JsonValue
@@ -1124,13 +1136,17 @@ cancel_parked = |sess, params| {
 answer_received : Server.Parts(state), Engine.Session, { id : JsonValue, answer : [Result(JsonValue), Error(JsonValue)] }, JsonValue -> Engine.Step(state)
 answer_received = |parts, sess, r, msg| {
 	unknown = { ..reply(sess, []), log: ["Received a response for an unknown message ID: ${msg.to_str()}"] }
-	out_id = match out_id_of(r.id) {
-		Ok(n) => n
-		Err(_) => return unknown
+	found = match out_id_of(r.id) {
+		Ok(n) =>
+			match sess.parked.find_first(|p| p.pending.any(|leg| leg.out_id == n)) {
+				Ok(p) => Ok((p, n))
+				Err(_) => Err(Unknown)
+			}
+		Err(_) => Err(Unknown)
 	}
-	match sess.parked.find_first(|p| p.pending.any(|leg| leg.out_id == out_id)) {
+	match found {
 		Err(_) => unknown
-		Ok(p) => {
+		Ok((p, out_id)) => {
 			key = (p.pending.find_first(|leg| leg.out_id == out_id) ?? { key: "", out_id }).key
 			answer = match r.answer {
 				Result(j) => Answered(j)
@@ -1183,11 +1199,11 @@ need_input : Server.Parts(state), Engine.Session, Engine.Call(state), JsonValue,
 need_input = |parts, sess, call, id, method, req, now_ms| {
 	round_no = call.ctx.round() + 1
 	requests = req.requests()
-	shim_form = req.progress_token()
-	missing = if (shim_form) requests.find_first(|(_, r)| Legacy.missing_capability(sess.client_capabilities, r)) else Err(NotFound)
-	refused = if (shim_form) [] else requests.keep_oks(|(key, r)| Legacy.direct_refusal(sess.client_capabilities, r).map_ok(|why| (key, why)))
-	to_send = requests.drop_if(|(key, _)| refused.any(|(k, _)| k == key))
-	refused_answers = refused.map(|(key, why)| (key, Failed(McpError.internal(why))))
+	plan = plan_round(sess.client_capabilities, req)
+	missing = plan.missing
+	refused = plan.refused
+	to_send = plan.to_send
+	refused_answers = plan.refused_answers
 	if !(Legacy.input_methods.contains(method)) {
 		error_reply(sess, id, McpError.internal("Handler for ${method} asked for input, but only tools/call, prompts/get and resources/read may"))
 	} else if round_no > Legacy.max_rounds {
@@ -1196,38 +1212,67 @@ need_input = |parts, sess, call, id, method, req, now_ms| {
 		error_reply(sess, id, McpError.internal("Handler for ${method} returned an input-required result with neither inputRequests nor requestState"))
 	} else {
 		match missing {
-			Ok((key, r)) => reply(sess, [shim_failure_line(id, method, Legacy.cannot_request(key, r.method()))])
+			Ok(text) => reply(sess, [shim_failure_line(id, method, text)])
 			Err(_) =>
-				match (parts.input_failures, refused) {
-					(FailRequest, [(_, why), ..]) => reply(sess, [shim_failure_line(id, method, Legacy.fulfil_failed(method, why))])
+				match (parts.input_failures, refused.first()) {
+					(FailRequest, Ok((_, why))) => reply(sess, [shim_failure_line(id, method, Legacy.fulfil_failed(method, why))])
 					_ =>
 						if to_send.is_empty() {
 							rerun(parts, sess, call.message, id, { inputs: refused_answers, request_state: req.request_state(), round: round_no })
 						} else {
 							first_n = sess.next_out_id
-							legs = to_send.map_with_index(|(key, r), i| { key, out_id: first_n + i, request: r })
-							lines = legs.map(
-								|leg| {
-									token = if (shim_form) Ok(leg.out_id) else Err(None)
-									Wire.request_line(JsonValue.from_u64(leg.out_id), leg.request.method(), Legacy.request_params(leg.request, token, "mcp-sdk-${leg.out_id.to_str()}"))
-								},
-							)
+							sent = round_requests(to_send, first_n, req.progress_token())
 							timeout = req.timeout_ms() ?? Legacy.default_round_timeout_ms
 							parked = {
 								id,
 								message: call.message,
 								method,
 								round: round_no,
-								pending: legs.map(|leg| { key: leg.key, out_id: leg.out_id }),
+								pending: sent.pending,
 								answers: refused_answers,
 								request_state: req.request_state(),
 								deadline_ms: now_ms + timeout,
 							}
-							reply({ ..sess, next_out_id: first_n + legs.len(), parked: sess.parked.append(parked) }, lines)
+							reply({ ..sess, next_out_id: first_n + sent.pending.len(), parked: sess.parked.append(parked) }, sent.lines)
 						}
 				}
 		}
 	}
+}
+
+## How a round's requests go out (not generic, compiled once): in the shim form, the first one
+## the client cannot take ends the call (`missing`, the failure text); in the direct form, the
+## ones a JS direct call would refuse are answered `Failed` at once and not sent.
+plan_round : JsonValue, Input.Required -> { missing : Try(Str, [NotFound]), refused : List((Str, Str)), to_send : List((Str, Input.Request)), refused_answers : List((Str, Input.Answer)) }
+plan_round = |caps, req| {
+	requests = req.requests()
+	shim_form = req.progress_token()
+	missing =
+		if shim_form {
+			match requests.find_first(|(_, r)| Legacy.missing_capability(caps, r)) {
+				Ok((key, r)) => Ok(Legacy.cannot_request(key, r.method()))
+				Err(_) => Err(NotFound)
+			}
+		} else {
+			Err(NotFound)
+		}
+	refused = if (shim_form) [] else requests.keep_oks(|(key, r)| Legacy.direct_refusal(caps, r).map_ok(|why| (key, why)))
+	to_send = requests.drop_if(|(key, _)| refused.any(|(k, _)| k == key))
+	refused_answers = refused.map(|(key, why)| (key, Failed(McpError.internal(why))))
+	{ missing, refused, to_send, refused_answers }
+}
+
+## The request lines of a round, with ids from `first_n`, and the pending entries.
+round_requests : List((Str, Input.Request)), U64, Bool -> { lines : List(Str), pending : List({ key : Str, out_id : U64 }) }
+round_requests = |to_send, first_n, shim_form| {
+	legs = to_send.map_with_index(|(key, r), i| { key, out_id: first_n + i, request: r })
+	lines = legs.map(
+		|leg| {
+			token = if (shim_form) Ok(leg.out_id) else Err(None)
+			Wire.request_line(JsonValue.from_u64(leg.out_id), leg.request.method(), Legacy.request_params(leg.request, token, "mcp-sdk-${leg.out_id.to_str()}"))
+		},
+	)
+	{ lines, pending: legs.map(|leg| { key: leg.key, out_id: leg.out_id }) }
 }
 
 ## The response line for a `Done` outcome.
