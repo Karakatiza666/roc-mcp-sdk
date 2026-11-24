@@ -19,7 +19,7 @@ Toolchain: Roc nightly-2026-11-23-b5c77fc (see `.roc-version`), basic-cli 0.28.1
 ```roc
 app [main!] {
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst",
-	mcp: "https://github.com/Karakatiza666/roc-mcp-sdk/releases/download/0.0.1/EdXXAsG8NbSKd8b92V5wg1MiMZAKBzf98Ua1jzJrwfED.tar.zst",
+	mcp: "https://github.com/Karakatiza666/roc-mcp-sdk/releases/download/0.0.2/EdXXAsG8NbSKd8b92V5wg1MiMZAKBzf98Ua1jzJrwfED.tar.zst",
 }
 ```
 
