@@ -12,7 +12,7 @@ notifications, and server-to-client requests (roots, elicitation, sampling).
 - The reference for behaviour is the JS SDK `@modelcontextprotocol/server` 2.0.0. Both protocol
   eras are served: 2025-11-25 (and older) and 2026-07-28.
 
-Toolchain: Roc nightly-2026-11-14-a87808d (see `.roc-version`), basic-cli 0.28.1.
+Toolchain: Roc nightly-2026-11-23-b5c77fc (see `.roc-version`), basic-cli 0.28.1.
 
 ## Install
 
