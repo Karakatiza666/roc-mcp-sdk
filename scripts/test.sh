@@ -10,7 +10,7 @@ RUNS=${RUNS:-10000}
 W=$ROOT/.tmp/test
 mkdir -p "$W/fuzz" "$ROOT/.tmp/tmp"
 export TMPDIR=$ROOT/.tmp/tmp
-ROC=scripts/roc.sh
+RC=scripts/roc.sh # not ROC: roc.sh reads $ROC as the compiler path
 FAIL=0
 step() { echo; echo "== $*"; }
 rc() { [ "$1" = 0 ] || { echo "FAIL ($1): $2"; FAIL=1; }; }
@@ -20,23 +20,23 @@ capped() {
 	fi
 }
 
-step "check: $($ROC version)"
-$ROC check package/main.roc; rc $? "check package/main.roc"
+step "check: $($RC version)"
+$RC check package/main.roc; rc $? "check package/main.roc"
 for f in tests/*.roc fuzz/*.roc examples/*.roc; do
-	$ROC check "$f" >"$W/check.log" 2>&1 || { rc 1 "check $f"; tail -20 "$W/check.log"; }
+	$RC check "$f" >"$W/check.log" 2>&1 || { rc 1 "check $f"; tail -20 "$W/check.log"; }
 done
 
 step "format"
-$ROC fmt --check package tests fuzz examples; rc $? "fmt --check"
+$RC fmt --check package tests fuzz examples; rc $? "fmt --check"
 
 step "L0"
-for f in tests/*.roc; do $ROC test "$f"; rc $? "test $f"; done
+for f in tests/*.roc; do $RC test "$f"; rc $? "test $f"; done
 
 step "L1: $RUNS runs, seed 1"
 for f in fuzz/*.roc; do
 	grep -qE '^app[[:space:]]*\[' "$f" || continue
 	n=$(basename "$f" .roc)
-	if ! $ROC build --fuzz "$f" --output="$W/fuzz/$n" >"$W/fuzz/$n.build.log" 2>&1; then
+	if ! $RC build --fuzz "$f" --output="$W/fuzz/$n" >"$W/fuzz/$n.build.log" 2>&1; then
 		rc 1 "build $f (see $W/fuzz/$n.build.log)"
 		continue
 	fi

@@ -2,7 +2,7 @@
 
 `roc-mcp-sdk` is a Roc package for writing a Model Context Protocol (MCP) **server**. The package itself has no platform: the app gives it the effects. The stdio transport is complete in this release. The Streamable HTTP transport has its final API, but every function of it crashes ("stub"). The reference for behaviour is the JS SDK `@modelcontextprotocol/server` 2.0.0 (with `@modelcontextprotocol/core`). The acceptance test is a lossless port of `roc-syntax-mcp` (`src/server.ts`, `src/index.ts`) to Roc on this package.
 
-Toolchain: nightly-2026-11-14-a87808d, the first nightly that basic-cli 0.28.1 accepts. Every API shape below was type-checked with that compiler in `research/spikes/` (section 11).
+Toolchain: nightly-2026-11-23-b5c77fc (`.roc-version`). basic-cli 0.28.1 needs nightly-2026-11-14-a87808d or later. Every API shape below was type-checked with nightly-2026-11-14-a87808d in `research/spikes/` (section 11).
 
 Contents: 1 decisions, 2 architecture, 3 repository layout, 4 public API, 5 engine and transports, 6 errors, 7 JS parity, 8 roc-syntax-mcp mapping, 9 testing, 10 work breakdown, 11 spike results, 12 compiler limits and workarounds, 13 open questions.
 
@@ -62,7 +62,7 @@ examples/everything.roc     basic-cli app: every feature (the E2E target)
 examples/hello.roc          basic-cli app: the smallest server (one tool)
 scripts/test.sh             check, fmt --check, L0, build the examples, E2E. Every step capped (systemd-run, timeout)
 scripts/e2e.sh              build examples/everything.roc, pipe each transcript, compare
-.roc-version                nightly-2026-11-14-a87808d
+.roc-version                nightly-2026-11-23-b5c77fc
 .github/workflows/release.yml  copy of ../roc-semver/.github/workflows/release.yml: PACKAGE_DIR=package,
                             ROC_NIGHTLY from .roc-version, one <base58>.tar.zst asset, tag X.Y.Z
 LICENSE                     UPL-1.0 (R-GP7). First line: `Copyright © 2026 Heorhii Bulakh and subsequent roc-mcp-sdk
@@ -431,7 +431,7 @@ Parallelism:
 | 11.9 | Top-level `server` constant holding closures | Built at compile time, and it runs the same as a server built in `main!` (identical output md5). |
 | 11.10 | `roc bundle` on the package dir | One `<base58>.tar.zst` (14.8 kB for the skeleton). |
 
-## 12. Compiler limits and workarounds (nightly-2026-11-14)
+## 12. Compiler limits and workarounds (nightly-2026-11-14; re-checked on nightly-2026-11-23)
 
 | # | Limit | Workaround |
 | --- | --- | --- |
@@ -456,6 +456,7 @@ Parallelism:
 | 12.19 | A test cannot call `call.run!` even when the handler is a pure lambda ("effectful expect"). | Scripted outcomes for `finish` (D1); the `Ctx.*_line` twins for the sends. |
 | 12.20 | A local lambda is generalized: `f = \|i\| "${i.to_str()}"` used with `U64`s and then called as `f(5000)` gives the literal its default type, `Dec`, so `to_str` is `"5000.0"`, not a `U64` (found as an invalid JSON-RPC id in a test). | Suffix the literal (`f(5000.U64)`) or annotate the lambda. |
 | 12.21 | **Build time.** An optimized build (`roc build`, `--opt=speed` or `size`) runs SpecConstr with `all_calls` clone inlining and inlines every body the whole program calls once. A small function (under 200 expressions) called with a constructor the compiler knows (`Ok(st)`, a record literal, `{ ..sess, era: Modern }`, a lambda) is cloned into a worker or inlined, and the clone inlines its own callees in turn, with no limit on the total: the engine's handlers collapsed into one procedure per caller, several times over, inside `Stdio.serve!`. The LIR passes and LLVM (SROA, LoopRotate) are superlinear in the size of one procedure, so `examples/hello.roc` went over 600 s (one 1.5 MB function; 375 s in LLVM alone). `--opt=dev` builds the same app in 2 s. Repro: `research/compile-time/`. | A body that contains a non-tail `return` is never inlined, neither by SpecConstr nor as a single-use body (`exprContainsReturn`, `contains_return` in the compiler). Each engine function that takes `Server.Parts`, and the recursive `SchemaCheck` functions, starts with an early `return` (a real guard such as `if parts.tools.is_empty() { return not_found(sess, id) }`), so each stays one procedure. hello: >600 s → 24 s; everything: 29 s. Keep the early returns when editing these functions; a tail `return` does not count (the compiler drops it as redundant). |
+| 12.22 | On nightly-2026-11-23 (not on 11-14), a char literal gets no default type: `'a'.to_u64()` alone is an error ("This number's type never resolved"). `roc check` accepts it; only `roc build` reports it. | Give the literal a type: `'a'.U8.to_u64()`, or compare it with a `U8` (`c >= 'a'`), as the SDK does. |
 
 ## 13. Open questions for the user
 

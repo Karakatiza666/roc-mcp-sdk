@@ -26,7 +26,7 @@ concurrency:
 # Paths and runners. Change them here only.
 env:
   # The pinned nightly, the same as .roc-version. A release in roc-lang/nightlies.
-  ROC_NIGHTLY: nightly-2026-11-14-a87808d
+  ROC_NIGHTLY: nightly-2026-11-23-b5c77fc
   # The package directory and its entry point.
   PACKAGE_DIR: package
   PACKAGE_MAIN: package/main.roc
